@@ -203,7 +203,7 @@ def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
     keys = (
         "auth_status", "typing_speed", "beep_count", "avg_interval_sec",
         "beep_intervals", "verification", "confidence_breakdown"
-    )
+    )  
     return {
         "device_id": device_id,
         "source": "keypad",

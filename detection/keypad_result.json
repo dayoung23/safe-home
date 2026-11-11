@@ -1,0 +1,318 @@
+[
+  {
+    "file_name": "비번 맞음.wav",
+    "source": "keypad",
+    "type": "keypad_input",
+    "message": "정상 인증 완료 (자릿수 불일치 (등록 4자리 vs 입력 5자리))",
+    "confidence": 0.9077,
+    "confidence_breakdown": {
+      "acoustic_score": 0.7693,
+      "pattern_score": 1.0
+    },
+    "timestamp": "2026-11-12T00:24:39",
+    "auth_status": "success",
+    "typing_speed": "normal",
+    "beep_count": 7,
+    "avg_interval_sec": 0.29,
+    "beep_intervals": [
+      0.188,
+      0.479,
+      0.212,
+      1.487
+    ],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.15,
+      "status": "length_mismatch",
+      "message": "자릿수 불일치 (등록 4자리 vs 입력 5자리)"
+    },
+    "top_3": [
+      {
+        "label": "Beep, bleep",
+        "score": 0.7693
+      },
+      {
+        "label": "Power windows, electric windows",
+        "score": 0.0132
+      },
+      {
+        "label": "Microwave oven",
+        "score": 0.0127
+      }
+    ]
+  },
+  {
+    "file_name": "비번 치는 속도 느림 및 틀림.wav",
+    "source": "keypad",
+    "type": "keypad_failed",
+    "message": "도어락 비밀번호 오류 경고음 감지 (입력 속도: slow)",
+    "confidence": 0.6876,
+    "confidence_breakdown": {
+      "acoustic_score": 0.7384,
+      "pattern_score": 0.6538
+    },
+    "timestamp": "2026-11-12T00:24:39",
+    "auth_status": "failed",
+    "typing_speed": "slow",
+    "beep_count": 27,
+    "avg_interval_sec": 0.26,
+    "beep_intervals": [
+      0.276,
+      0.188,
+      0.178,
+      0.213,
+      0.309,
+      0.286,
+      0.259,
+      1.793,
+      1.779,
+      0.154,
+      1.414,
+      0.183,
+      0.321,
+      0.477,
+      0.225,
+      1.2,
+      0.206,
+      0.177,
+      0.684,
+      0.17,
+      0.266,
+      0.29,
+      0.188,
+      0.219,
+      0.241,
+      0.723
+    ],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.15,
+      "status": "length_mismatch",
+      "message": "자릿수 불일치 (등록 4자리 vs 입력 27자리)"
+    },
+    "top_3": [
+      {
+        "label": "Beep, bleep",
+        "score": 0.7384
+      },
+      {
+        "label": "Microwave oven",
+        "score": 0.032
+      },
+      {
+        "label": "Pulse",
+        "score": 0.0228
+      }
+    ]
+  },
+  {
+    "file_name": "비번 틀림.wav",
+    "source": "keypad",
+    "type": "keypad_failed",
+    "message": "도어락 비밀번호 오류 경고음 감지 (입력 속도: normal)",
+    "confidence": 0.6515,
+    "confidence_breakdown": {
+      "acoustic_score": 0.7221,
+      "pattern_score": 0.6045
+    },
+    "timestamp": "2026-11-12T00:24:40",
+    "auth_status": "failed",
+    "typing_speed": "normal",
+    "beep_count": 23,
+    "avg_interval_sec": 0.25,
+    "beep_intervals": [
+      0.306,
+      0.26,
+      0.211,
+      0.325,
+      0.634,
+      0.164,
+      0.156,
+      0.269,
+      0.152,
+      0.457,
+      0.231,
+      0.212,
+      0.172,
+      0.268,
+      0.173,
+      0.31,
+      0.174,
+      0.163,
+      0.21,
+      0.203,
+      0.272,
+      1.049
+    ],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.15,
+      "status": "length_mismatch",
+      "message": "자릿수 불일치 (등록 4자리 vs 입력 23자리)"
+    },
+    "top_3": [
+      {
+        "label": "Beep, bleep",
+        "score": 0.7221
+      },
+      {
+        "label": "Music",
+        "score": 0.0303
+      },
+      {
+        "label": "Alarm clock",
+        "score": 0.0169
+      }
+    ]
+  },
+  {
+    "file_name": "잠금.wav",
+    "source": "keypad",
+    "type": "keypad_input",
+    "message": "정상 인증 완료 (타건 데이터 부족 (판정 불가))",
+    "confidence": 0.4613,
+    "confidence_breakdown": {
+      "acoustic_score": 0.3283,
+      "pattern_score": 0.55
+    },
+    "timestamp": "2026-11-12T00:24:40",
+    "auth_status": "success",
+    "typing_speed": "normal",
+    "beep_count": 2,
+    "avg_interval_sec": 0.23,
+    "beep_intervals": [
+      0.23
+    ],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.0,
+      "status": "insufficient_data",
+      "message": "타건 데이터 부족 (판정 불가)"
+    },
+    "top_3": [
+      {
+        "label": "Single-lens reflex camera",
+        "score": 0.3283
+      },
+      {
+        "label": "Beep, bleep",
+        "score": 0.1863
+      },
+      {
+        "label": "Scrape",
+        "score": 0.035
+      }
+    ]
+  },
+  {
+    "file_name": "문 쾅 비명.wav",
+    "source": "keypad",
+    "type": "Speech",
+    "message": "도어락 주변 음향 감지: Speech",
+    "confidence": 0.9628,
+    "confidence_breakdown": {
+      "acoustic_score": 0.9628,
+      "pattern_score": 0.0
+    },
+    "timestamp": "2026-11-12T00:24:40",
+    "auth_status": "unknown",
+    "typing_speed": "none",
+    "beep_count": 0,
+    "avg_interval_sec": 0.0,
+    "beep_intervals": [],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.0,
+      "status": "none",
+      "message": "일반 음향"
+    },
+    "top_3": [
+      {
+        "label": "Speech",
+        "score": 0.9628
+      },
+      {
+        "label": "Inside, small room",
+        "score": 0.0085
+      },
+      {
+        "label": "Screaming",
+        "score": 0.0065
+      }
+    ]
+  },
+  {
+    "file_name": "문 쾅.wav",
+    "source": "keypad",
+    "type": "Speech",
+    "message": "도어락 주변 음향 감지: Speech",
+    "confidence": 0.2372,
+    "confidence_breakdown": {
+      "acoustic_score": 0.2372,
+      "pattern_score": 0.0
+    },
+    "timestamp": "2026-11-12T00:24:41",
+    "auth_status": "unknown",
+    "typing_speed": "none",
+    "beep_count": 0,
+    "avg_interval_sec": 0.0,
+    "beep_intervals": [],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.0,
+      "status": "none",
+      "message": "일반 음향"
+    },
+    "top_3": [
+      {
+        "label": "Speech",
+        "score": 0.2372
+      },
+      {
+        "label": "Laughter",
+        "score": 0.1605
+      },
+      {
+        "label": "Slam",
+        "score": 0.1038
+      }
+    ]
+  },
+  {
+    "file_name": "소리 없음.wav",
+    "source": "keypad",
+    "type": "Speech",
+    "message": "도어락 주변 음향 감지: Speech",
+    "confidence": 0.7353,
+    "confidence_breakdown": {
+      "acoustic_score": 0.7353,
+      "pattern_score": 0.0
+    },
+    "timestamp": "2026-11-12T00:24:41",
+    "auth_status": "unknown",
+    "typing_speed": "none",
+    "beep_count": 0,
+    "avg_interval_sec": 0.0,
+    "beep_intervals": [],
+    "verification": {
+      "is_owner": false,
+      "similarity": 0.0,
+      "status": "none",
+      "message": "일반 음향"
+    },
+    "top_3": [
+      {
+        "label": "Speech",
+        "score": 0.7353
+      },
+      {
+        "label": "Door",
+        "score": 0.0973
+      },
+      {
+        "label": "Sliding door",
+        "score": 0.0639
+      }
+    ]
+  }
+]
