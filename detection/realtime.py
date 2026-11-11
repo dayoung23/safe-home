@@ -8,9 +8,10 @@
 필요 패키지: pip install sounddevice requests   (mic 모드만 sounddevice 필요)
 필요 프로그램: ffmpeg (rtsp / 파일 모드)   brew install ffmpeg
 
-이벤트 형식 (위험 소리 / 키패드 공통):
-  device_id, source("audio"|"keypad"), type, message, confidence,
+이벤트 형식 (위험 소리 / 키패드 공통, vision.py 와 같은 공통 필드):
+  device_id, event_id, source("sound"|"keypad"), type, message, confidence(0~1),
   risk_level("normal"|"warning"|"danger"), timestamp, top_3, detail{...}
+  → notify() → realtime_events.jsonl + risk.judge.on_event (별도 스레드) + (옵션) HTTP
 """
 import argparse
 import datetime
@@ -19,14 +20,19 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 
 import numpy as np
 import requests
 
-# AST 모델은 sound.py에서 한 번만 로드해 공유합니다.
-from sound import classifier, WATCH_THRESHOLDS
-from keypad import analyze_keypad_audio, LOCK_TOP_LABELS
+# AST 모델 및 키패드 분석 함수 로드 (루트 실행 및 단독 실행 동시 지원)
+try:
+    from detection.sound import classifier, WATCH_THRESHOLDS        # 루트에서 python main.py
+    from detection.keypad import analyze_keypad_audio, LOCK_TOP_LABELS
+except ImportError:
+    from sound import classifier, WATCH_THRESHOLDS                  # detection 폴더에서 단독 실행
+    from keypad import analyze_keypad_audio, LOCK_TOP_LABELS
 
 # ───────────────────────── 설정 ─────────────────────────
 SR = 16000                # AST 입력 샘플레이트
@@ -36,7 +42,7 @@ HOP_SEC = 2.0             # 분석 주기
 BUFFER_SEC = 60.0         # 키패드 입력 구간을 통째로 꺼내 쓰기 위한 보관 길이
 SILENCE_RMS = 0.005       # 이보다 조용하면 모델 호출 생략 (연산 절약)
 COOLDOWN_SEC = 30         # 같은 위험 상황에서 알림 중복 전송 방지 시간
-SERVER_URL = ""           # 예: "http://localhost:8000/api/events" (비워두면 전송 안 함)
+SERVER_URL = os.getenv("AUDIO_SERVER_URL", "")   # 비워두면 HTTP 전송 안 함
 EVENT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "realtime_events.jsonl")
 
 # ── 도어락 키패드 설정 ──
@@ -48,7 +54,7 @@ LOCK_COOLDOWN_SEC = 10.0        # 잠금음 중복 이벤트 방지
 KEYPAD_FAIL_DANGER = 3          # 이 횟수만큼 오류가 반복되면 위험으로 격상
 KEYPAD_FAIL_WINDOW_SEC = 180.0  # 오류 반복을 세는 시간 범위
 
-# 위험 라벨별 위험 등급 (1 = 주의, 2 = 위험). 여기에 없는 라벨(예: Door)은 알림에서 제외
+# 위험 라벨별 위험 등급 (1 = 주의, 2 = 위험)
 RISK_RANK = {
     "Screaming": 2, "Glass": 2, "Shatter": 2, "Smash, crash": 2, "Breaking": 2,
     "Shout": 1, "Yell": 1, "Slam": 1, "Bang": 1, "Thump, thud": 1, "Crying, sobbing": 1,
@@ -61,6 +67,16 @@ LABEL_KO = {
     "Glass": "유리 소리", "Shatter": "유리 깨지는 소리", "Breaking": "파손 소리",
     "Crying, sobbing": "울음소리",
 }
+# AST 라벨 → judge 규칙용 짧은 type (설계 문서 5-2)
+SOUND_TYPE = {
+    "Screaming": "scream", "Shout": "shout", "Yell": "shout",
+    "Glass": "glass_break", "Shatter": "glass_break", "Smash, crash": "glass_break", "Breaking": "glass_break",
+    "Slam": "door_slam", "Bang": "bang", "Thump, thud": "thump", "Crying, sobbing": "crying",
+}
+
+
+def new_event_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 stop = threading.Event()
 finished = threading.Event()   # 파일 재생이 끝났을 때 (테스트용)
@@ -86,13 +102,11 @@ class RingBuffer:
             self.total += n
 
     def last(self, n: int):
-        """최근 n샘플과 현재 total을 반환합니다."""
         with self.lock:
             n = min(n, self.size)
             return self.buf[-n:].copy(), self.total
 
     def range(self, start: int, end: int) -> np.ndarray:
-        """전체 샘플 위치 [start, end) 구간을 꺼냅니다. (보관 범위를 벗어나면 잘라냄)"""
         with self.lock:
             s = max(start, self.total - self.size, 0)
             e = min(end, self.total)
@@ -119,7 +133,7 @@ def capture_ffmpeg(ring: RingBuffer, source: str, is_file: bool):
     """ffmpeg로 RTSP/파일 오디오를 16kHz 모노 PCM으로 받아 버퍼에 채웁니다."""
     cmd = ["ffmpeg", "-loglevel", "error"]
     if is_file:
-        cmd += ["-re"]                           # 실제 속도로 재생 (테스트용)
+        cmd += ["-re"]
     elif source.startswith("rtsp"):
         cmd += ["-rtsp_transport", "tcp"]
     cmd += ["-i", source, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
@@ -160,43 +174,52 @@ def evaluate(window: np.ndarray):
     alerts = [k for k, v in watch.items()
               if v >= WATCH_THRESHOLDS[k] and RISK_RANK.get(k, 0) > 0]
     level = max((RISK_RANK[k] for k in alerts), default=0)
-    if len(alerts) >= 2:       # 서로 다른 위험 소리가 동시에 나오면 위험으로 격상 (예: 쾅 + 비명)
+    if len(alerts) >= 2:
         level = 2
     return preds[:3], watch, alerts, level, infer_sec
 
 
 def keypad_risk(res: dict, fail_times: deque) -> str:
-    """키패드 판정 결과를 위험도로 바꿉니다. 오류가 짧은 시간에 반복되면 위험으로 격상합니다."""
+    """키패드 판정 결과를 위험도로 변환 (타건 리듬 불일치 시 경고 격상 포함)"""
     if res["type"] == "keypad_failed":
         now = time.time()
         fail_times.append(now)
         while fail_times and now - fail_times[0] > KEYPAD_FAIL_WINDOW_SEC:
             fail_times.popleft()
         return "danger" if len(fail_times) >= KEYPAD_FAIL_DANGER else "warning"
-    if res["type"] == "keypad_slow_input":
+
+    # 타건 패턴 불일치(keypad_anomaly) 및 입력 지연(keypad_slow_input)은 warning
+    if res["type"] in ["keypad_slow_input", "keypad_anomaly"]:
         return "warning"
-    return "normal"      # 정상 입력, 잠금
+
+    return "normal"
 
 
 # ───────────────────────── 이벤트 · 알림 ─────────────────────────
 def make_hazard_event(device_id, ts, primary, level, alerts, watch, top3) -> dict:
     return {
         "device_id": device_id,
-        "source": "audio",
-        "type": primary,
+        "event_id": new_event_id("sound"),
+        "source": "sound",
+        "type": SOUND_TYPE.get(primary, primary),
         "message": f"{LABEL_KO.get(primary, primary)} 소리 감지 - {LEVEL_KO[level]}",
         "confidence": watch[primary],
         "risk_level": LEVEL_NAME[level],
         "timestamp": ts,
         "top_3": [{"label": p["label"], "score": round(float(p["score"]), 4)} for p in top3],
-        "detail": {"alerts": alerts, "watch": dict(list(watch.items())[:6])},
+        "detail": {"label": primary, "alerts": alerts, "watch": dict(list(watch.items())[:6])},
     }
 
 
 def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
-    keys = ("auth_status", "typing_speed", "beep_count", "avg_interval_sec", "confidence_breakdown")
+    # beep_intervals와 집주인 패턴 대조 결과(verification)를 detail에 포함
+    keys = (
+        "auth_status", "typing_speed", "beep_count", "avg_interval_sec",
+        "beep_intervals", "verification", "member_id", "member_name", "confidence_breakdown"
+    )
     return {
         "device_id": device_id,
+        "event_id": new_event_id("keypad"),
         "source": "keypad",
         "type": res["type"],
         "message": res["message"],
@@ -208,9 +231,22 @@ def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
     }
 
 
+def _send_to_judge(event: dict):
+    """judge.on_event를 별도 스레드로 호출 → LLM이 느려도 녹음 루프는 안 멈춤"""
+    try:
+        from risk import judge
+    except ImportError as e:
+        print(f"[경고] risk.judge import 실패: {e}")
+        return
+    if hasattr(judge, "on_event"):
+        threading.Thread(target=judge.on_event, args=(event,), daemon=True).start()
+
+
 def notify(event: dict):
     with open(EVENT_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    _send_to_judge(event)   # 최근 이벤트 보관·시간 묶기는 judge 가 담당
+
     if SERVER_URL:
         try:
             requests.post(SERVER_URL, json=event, timeout=3)
@@ -220,11 +256,18 @@ def notify(event: dict):
 
 # ───────────────────────── 메인 루프 ─────────────────────────
 def main():
+    """명령줄 단독 실행용: python realtime.py --source mic"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default="mic", help="mic | 파일 경로 | rtsp://...")
     parser.add_argument("--device-id", default="homecam-1")
     parser.add_argument("--mic-device", type=int, default=None, help="마이크 장치 번호 (선택)")
     args = parser.parse_args()
+    run(args.source, args.device_id, args.mic_device)
+
+
+def run(source: str = "mic", device_id: str = "homecam-1", mic_device=None):
+    """main.py가 스레드로 실행하는 함수"""
+    args = argparse.Namespace(source=source, device_id=device_id, mic_device=mic_device)
 
     ring = RingBuffer(BUFFER_SEC)
     is_file = os.path.exists(args.source)
@@ -239,11 +282,11 @@ def main():
     quiet_n = int(KEYPAD_QUIET_SEC * SR)
 
     print(f"\n실시간 감지 시작 (source={args.source}, 창 {WINDOW_SEC}s / 주기 {HOP_SEC}s). 종료: Ctrl+C")
-    print("=" * 70)
+    print("=" * 75)
 
-    last_sent = {"t": 0.0, "level": 0}   # 위험 소리 알림 쿨다운 상태
-    session = None                       # 진행 중인 키패드 입력 구간 {"start": 샘플 위치}
-    refractory_until = 0                 # 이 샘플 위치 전에는 새 키패드 구간을 시작하지 않음
+    last_sent = {"t": 0.0, "level": 0}
+    session = None
+    refractory_until = 0
     last_lock_t = 0.0
     fail_times = deque()
 
@@ -265,7 +308,7 @@ def main():
                     print(f"[{ts}] rms={rms:.3f} top1={top1['label']}({top1['score']:.2f}) "
                           f"risk={LEVEL_NAME[level]} (추론 {infer:.1f}s)")
 
-                    # ── 1) 위험 소리 알림 ──
+                    # 1) 위험 소리 알림
                     if level > 0:
                         now_t = time.time()
                         cooled = now_t - last_sent["t"] >= COOLDOWN_SEC
@@ -279,12 +322,12 @@ def main():
 
                 top1_label = top3[0]["label"] if top3 else None
 
-                # ── 2) 도어락: 키패드 입력 구간 시작 / 잠금음 ──
+                # 2) 도어락 키패드 입력 세션 시작 및 잠금음 처리
                 if session is None:
                     if top1_label == "Beep, bleep" and total >= refractory_until:
                         start = max(0, total - win_n - int(KEYPAD_PRE_ROLL_SEC * SR))
                         session = {"start": start}
-                        print("  🔐 키패드 소리 감지 - 입력이 끝날 때까지 수집합니다")
+                        print("  🔐 키패드 소리 감지 - 입력 완료까지 수집 중...")
                     elif top1_label in LOCK_TOP_LABELS and time.time() - last_lock_t >= LOCK_COOLDOWN_SEC:
                         res = analyze_keypad_audio(window, SR, top3)
                         event = make_keypad_event(res, args.device_id, keypad_risk(res, fail_times))
@@ -292,8 +335,8 @@ def main():
                         last_lock_t = time.time()
                         print(f"  🔐 도어락 이벤트: {event['message']} (risk={event['risk_level']})")
 
-                # ── 3) 도어락: 입력이 끝났는지 확인하고 한 번에 판정 ──
-                if session is not None:
+                # 3) 도어락 입력 세션 완료 판정 (elif로 세션 생성 즉시 종료 방지)
+                elif session is not None:
                     quiet_rms = rms_of(ring.last(quiet_n)[0])
                     elapsed = (total - session["start"]) / SR
                     if quiet_rms < SILENCE_RMS or elapsed >= KEYPAD_MAX_SESSION_SEC or finished.is_set():
@@ -302,8 +345,13 @@ def main():
                         res = analyze_keypad_audio(audio, SR, preds)
                         event = make_keypad_event(res, args.device_id, keypad_risk(res, fail_times))
                         notify(event)
-                        print(f"  🔐 키패드 판정: {event['message']} "
-                              f"(비프 {res['beep_count']}회, risk={event['risk_level']})")
+
+                        # 실시간 판정 콘솔에 유사도 및 PASS/FAIL 출력
+                        v = res.get("verification", {})
+                        sim = f"{v.get('similarity_pct', 0)}%" if 'similarity_pct' in v else "-"
+                        verdict = "PASS" if v.get("is_owner") else "FAIL"
+                        print(f"  🔐 키패드 판정: {event['message']} | 인증: {verdict} ({sim}) | risk={event['risk_level']}")
+
                         session = None
                         refractory_until = total + int(KEYPAD_REFRACTORY_SEC * SR)
 

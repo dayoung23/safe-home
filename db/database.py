@@ -161,7 +161,8 @@ def get_recent_alerts(limit=20):
 # ─────────────────────────── 키패드 샘플 ───────────────────────────
 def add_keypad_sample(user_id, result):
     """등록용 키패드 샘플 저장 → 샘플 id. users.sample_count +1.
-    result: keypad.py 출력 dict (avg_interval_sec, beep_count 필수, intervals는 있으면 저장)"""
+    result: keypad.py 출력 dict (avg_interval_sec, beep_count 필수, intervals/beep_intervals 는 있으면 저장)
+    intervals 가 없는 샘플은 타건 프로필 계산에서 빠진다."""
     doc = {
         "user_id": user_id,
         "avg_interval_sec": float(result["avg_interval_sec"]),
@@ -169,8 +170,9 @@ def add_keypad_sample(user_id, result):
         "typing_speed": result.get("typing_speed"),
         "created_at": _now(),
     }
-    if result.get("intervals"):
-        doc["intervals"] = [float(x) for x in result["intervals"]]
+    intervals = result.get("intervals") or result.get("beep_intervals")  # keypad.py 는 beep_intervals 로 냄
+    if intervals:
+        doc["intervals"] = [float(x) for x in intervals]
     inserted = keypad_samples.insert_one(doc)
     users.update_one({"_id": _oid(user_id)}, {"$inc": {"sample_count": 1}})
     return str(inserted.inserted_id)
