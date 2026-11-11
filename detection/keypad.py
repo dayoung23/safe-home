@@ -2,6 +2,8 @@ import os
 import glob
 import json
 import datetime
+import threading
+import time
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import find_peaks
@@ -13,94 +15,183 @@ except ImportError:
     from sound import classifier                # detection 폴더에서 단독 실행할 때
 
 LOCK_TOP_LABELS = ["Single-lens reflex camera", "Mechanisms", "Clicking"]
-PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_profile.json")
+
+# ── 사용자별 타건 프로필 (MongoDB users + keypad_samples) ──
+REGISTER_TARGET = 5          # 등록 때 받을 입력 횟수
+REGISTER_TIMEOUT_SEC = 180   # 등록 모드 자동 종료
+MIN_SAMPLES = 3              # 이보다 샘플이 적은 사용자는 비교에서 제외
+OWNER_SIMILARITY = 0.70      # 이 이상이면 등록 사용자로 인정
+PROFILE_CACHE_SEC = 30       # DB 조회 캐시 (새 샘플이 저장되면 즉시 무효화)
+
+_lock = threading.Lock()
+_register = None             # {"user_id","name","count","target","done","started"}
+_profiles_cache = {"t": 0.0, "profiles": None}
 
 
-# ───────────────────────── 1. 집주인 타건 프로필 관리 & 비교 엔진 ─────────────────────────
+def _db():
+    from db import database   # 단독 실행(.env 없음)에서도 분석은 되도록 지연 import
+    return database
 
-def load_or_create_owner_profile() -> dict:
-    """
-    집주인의 등록 타건 프로필(Baseline)을 불러옵니다.
-    파일이 없으면 4자리 비밀번호(간격 3개, 평균 0.35초)를 기본 기준선으로 자동 생성합니다.
-    """
-    if os.path.exists(PROFILE_PATH):
+
+# ───────────────────────── 1. 등록 (auth.py 가 호출) ─────────────────────────
+
+def start_register(user_id: str, name: str, target: int = REGISTER_TARGET) -> dict:
+    """로그인한 사용자의 키패드 패턴 등록 시작. 이후 도어락 입력 target 회를 이 사용자 샘플로 저장."""
+    global _register
+    with _lock:
+        _register = {"user_id": str(user_id), "name": name, "count": 0,
+                     "target": int(target), "done": False, "started": time.time()}
+        return _public_status()
+
+
+def get_register_status():
+    """{"user_id","name","count","target","done"} 또는 None (등록 중 아님)"""
+    with _lock:
+        _expire_register()
+        return _public_status()
+
+
+def _public_status():
+    if _register is None:
+        return None
+    return {k: _register[k] for k in ("user_id", "name", "count", "target", "done")}
+
+
+def _expire_register():
+    global _register
+    if _register and not _register["done"] and time.time() - _register["started"] > REGISTER_TIMEOUT_SEC:
+        print(f"[keypad] 등록 시간 초과 → 종료 ({_register['name']} {_register['count']}/{_register['target']})")
+        _register = None
+
+
+def _record_register_sample(speed_info: dict):
+    """등록 모드면 이번 입력을 샘플로 저장하고 상태 반환, 아니면 None."""
+    with _lock:
+        _expire_register()
+        reg = _register
+        if reg is None or reg["done"]:
+            return None
+        intervals = speed_info.get("beep_intervals") or []
+        if len(intervals) < 2:
+            return {**_public_status(), "saved": False}
         try:
-            with open(PROFILE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+            _db().add_keypad_sample(reg["user_id"], {
+                "avg_interval_sec": speed_info["avg_interval_sec"],
+                "beep_count": speed_info["beep_count"],
+                "typing_speed": speed_info["typing_speed"],
+                "intervals": intervals,
+            })
+        except Exception as e:
+            print(f"[keypad] 샘플 저장 실패: {e}")
+            return {**_public_status(), "saved": False}
+        reg["count"] += 1
+        reg["done"] = reg["count"] >= reg["target"]
+        _profiles_cache["profiles"] = None          # 새 샘플 → 프로필 다시 계산
+        return {**_public_status(), "saved": True}
 
-    # 기본 집주인 프로필 (4자리 비밀번호 기준: 버튼 사이 간격 3개)
-    default_profile = {
-        "user_name": "집주인_A",
-        "pin_length": 4,
-        "mean_intervals": [0.35, 0.40, 0.32],  # 집주인 고유 타건 리듬
-        "std_intervals": [0.06, 0.08, 0.05],   # 허용 오차 범위
-        "enrolled_count": 5,
-        "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# ───────────────────────── 2. 프로필 계산 & 비교 엔진 ─────────────────────────
+
+def build_profile(samples: list) -> dict | None:
+    """keypad_samples → {"pin_length","mean_intervals","std_intervals","sample_count"}.
+    자릿수가 섞여 있으면 가장 많은 자릿수의 샘플만 사용."""
+    seqs = [s["intervals"] for s in samples if len(s.get("intervals") or []) >= 2]
+    if not seqs:
+        return None
+    lengths = [len(x) for x in seqs]
+    n = max(set(lengths), key=lengths.count)
+    same = np.array([x for x in seqs if len(x) == n], dtype=float)
+    if len(same) < MIN_SAMPLES:
+        return None
+    return {
+        "pin_length": n + 1,
+        "mean_intervals": same.mean(axis=0).round(3).tolist(),
+        "std_intervals": same.std(axis=0).round(3).tolist(),
+        "sample_count": int(len(same)),
     }
-    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(default_profile, f, indent=2, ensure_ascii=False)
-    return default_profile
+
+
+def load_profiles() -> list:
+    """등록된 모든 사용자의 프로필 [{"user_id","name",...profile}] (캐시)."""
+    now = time.time()
+    with _lock:
+        cached = _profiles_cache["profiles"]
+        if cached is not None and now - _profiles_cache["t"] < PROFILE_CACHE_SEC:
+            return cached
+    profiles = []
+    try:
+        db = _db()
+        for u in db.get_users():
+            prof = build_profile(db.get_keypad_samples(u["id"]))
+            if prof:
+                profiles.append({"user_id": u["id"], "name": u.get("name") or u.get("username"), **prof})
+    except Exception as e:
+        print(f"[keypad] 프로필 조회 실패 → 비교 없이 진행: {e}")
+        return []
+    with _lock:
+        _profiles_cache.update(t=now, profiles=profiles)
+    return profiles
 
 
 def verify_keystroke_pattern(current_intervals: list, profile: dict) -> dict:
-    """
-    현재 입력된 비프음 간격 배열과 등록된 집주인 프로필을 비교하여
-    유사도(0~100%)와 집주인 인증 여부를 판정합니다.
-    """
+    """현재 비프 간격과 프로필 1개를 비교 → 유사도(0~1)와 일치 여부."""
     if not current_intervals or len(current_intervals) < 2:
-        return {
-            "is_owner": False,
-            "similarity": 0.0,
-            "status": "insufficient_data",
-            "message": "타건 데이터 부족 (판정 불가)"
-        }
+        return {"is_owner": False, "similarity": 0.0, "status": "insufficient_data",
+                "message": "타건 데이터 부족 (판정 불가)"}
 
-    ref_means = np.array(profile.get("mean_intervals", [0.35, 0.40, 0.32]))
-    ref_stds = np.array(profile.get("std_intervals", [0.06, 0.08, 0.05]))
-    curr = np.array(current_intervals)
+    ref_means = np.array(profile["mean_intervals"], dtype=float)
+    ref_stds = np.array(profile["std_intervals"], dtype=float)
+    curr = np.array(current_intervals, dtype=float)
 
-    # 1. 자릿수(간격 개수) 불일치: 비밀번호 자릿수부터 다른 경우
     if len(curr) != len(ref_means):
-        return {
-            "is_owner": False,
-            "similarity": 0.15,
-            "status": "length_mismatch",
-            "message": f"자릿수 불일치 (등록 {len(ref_means)+1}자리 vs 입력 {len(curr)+1}자리)"
-        }
+        return {"is_owner": False, "similarity": 0.15, "similarity_pct": 15.0, "status": "length_mismatch",
+                "message": f"자릿수 불일치 (등록 {len(ref_means)+1}자리 vs 입력 {len(curr)+1}자리)"}
 
-    # 2. 각 구간별 Z-score 오차 계산
-    # 허용 표준편차(최소 0.04초)로 나누어 각 버튼 사이의 시간 차이를 정규화
-    stds_clipped = np.maximum(ref_stds, 0.04)
-    z_scores = np.abs((curr - ref_means) / stds_clipped)
+    # 구간별 Z-score (허용 표준편차 최소 0.04초) → 지수 감쇠로 유사도 환산
+    z_scores = np.abs((curr - ref_means) / np.maximum(ref_stds, 0.04))
     avg_z = float(np.mean(z_scores))
-
-    # 3. 유사도 환산 (Z-score가 0이면 100%, 오차가 커질수록 지수 감쇠)
     similarity = float(np.exp(-0.4 * avg_z))
-    similarity_pct = round(similarity * 100, 1)
-
-    # 70% 이상 일치 시 집주인으로 최종 승인
-    is_owner = similarity >= 0.70
-
-    if is_owner:
-        status = "owner_verified"
-        msg = f"집주인 타건 리듬 일치 (유사도 {similarity_pct}%)"
-    else:
-        status = "rhythm_mismatch"
-        msg = f"타건 리듬 불일치 - 비번 유출/침입 의심 (유사도 {similarity_pct}%)"
-
     return {
-        "is_owner": is_owner,
+        "is_owner": similarity >= OWNER_SIMILARITY,
         "similarity": round(similarity, 4),
-        "similarity_pct": similarity_pct,
+        "similarity_pct": round(similarity * 100, 1),
         "avg_z_score": round(avg_z, 2),
-        "status": status,
-        "message": msg
+        "status": "owner_verified" if similarity >= OWNER_SIMILARITY else "rhythm_mismatch",
     }
 
 
-# ───────────────────────── 2. 오디오 분석 및 특징 추출 ─────────────────────────
+def identify_member(current_intervals: list) -> dict:
+    """등록된 모든 사용자와 비교해 가장 비슷한 사람을 찾음.
+    반환: verification dict + member_id / member_name (일치하는 사람 없으면 None)"""
+    profiles = load_profiles()
+    if not profiles:
+        return {"is_owner": False, "similarity": 0.0, "status": "no_profile",
+                "member_id": None, "member_name": None,
+                "message": "등록된 타건 패턴 없음 (비교 생략)"}
+
+    best, best_p = None, None
+    for p in profiles:
+        v = verify_keystroke_pattern(current_intervals, p)
+        if best is None or v["similarity"] > best["similarity"]:
+            best, best_p = v, p
+    if best["status"] == "insufficient_data":
+        return {**best, "member_id": None, "member_name": None}
+
+    sim = best.get("similarity_pct", 0)
+    if best["is_owner"]:
+        msg = f"{best_p['name']}님 타건 리듬 일치 (유사도 {sim}%)"
+        member_id, member_name = best_p["user_id"], best_p["name"]
+    elif best["status"] == "length_mismatch":
+        msg = f"등록된 사용자와 자릿수가 달라요 - 도용 의심 (가장 가까운 {best_p['name']}님 기준)"
+        member_id = member_name = None
+    else:
+        msg = f"등록된 사용자 리듬과 불일치 - 도용 의심 (가장 가까운 {best_p['name']}님 {sim}%)"
+        member_id = member_name = None
+    return {**best, "member_id": member_id, "member_name": member_name,
+            "closest": best_p["name"], "message": msg}
+
+
+# ───────────────────────── 3. 오디오 분석 및 특징 추출 ─────────────────────────
 
 def calculate_pattern_confidence(beep_count: int, intervals: list, speed: str) -> float:
     if beep_count < 2 or not intervals:
@@ -206,8 +297,6 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
     top_3_labels = [p["label"] for p in predictions]
     is_keypad_candidate = (top_label == "Beep, bleep") or ("Beep, bleep" in top_3_labels) or ("Alarm clock" in top_3_labels)
 
-    owner_profile = load_or_create_owner_profile()
-
     if is_keypad_candidate:
         speed_info = analyze_beep_intervals(data, sample_rate)
         typing_speed = speed_info["typing_speed"]
@@ -216,12 +305,24 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
         pattern_conf = speed_info["pattern_confidence"]
         beep_intervals = speed_info.get("beep_intervals", [])
 
-        # ── 비교 엔진 가동: 집주인 타건 패턴과 실시간 대조 ──
-        verification = verify_keystroke_pattern(beep_intervals, owner_profile)
-
         has_error_alarm = ("Alarm clock" in top_3_labels) or (beep_count >= 10) or (top_label == "Alarm clock")
 
-        if has_error_alarm:
+        # 등록 모드면 이번 입력은 비교하지 않고 샘플로 저장 (오류음이 난 입력은 제외)
+        reg = None if has_error_alarm else _record_register_sample(speed_info)
+        if reg is not None:
+            verification = {"is_owner": True, "status": "registering", "member_id": reg["user_id"],
+                            "member_name": reg["name"], "message": "패턴 등록 중"}
+        else:
+            # ── 비교 엔진: 등록된 모든 사용자 패턴과 대조 ──
+            verification = identify_member(beep_intervals)
+
+        if reg is not None:
+            auth_status = "registering"
+            event_type = "keypad_register"
+            done = " - 등록 완료" if reg["done"] else ""
+            saved = "" if reg["saved"] else " (간격 인식 실패, 다시 입력해 주세요)"
+            msg = f"{reg['name']}님 키패드 패턴 등록 {reg['count']}/{reg['target']}{done}{saved}"
+        elif has_error_alarm:
             auth_status = "failed"
             event_type = "keypad_failed"
             msg = f"도어락 비밀번호 오류 경고음 감지 (입력 속도: {typing_speed})"
@@ -229,7 +330,7 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
             auth_status = "pending"
             event_type = "keypad_slow_input"
             msg = f"키패드 입력 지연 감지 (유추 의심 | {verification['message']})"
-        elif not verification["is_owner"] and verification["status"] == "rhythm_mismatch":
+        elif verification["status"] in ("rhythm_mismatch", "length_mismatch"):
             # 비밀번호는 맞췄으나 집주인 리듬과 현저히 다른 경우 -> 경고 격상
             auth_status = "mismatch"
             event_type = "keypad_anomaly"
@@ -237,7 +338,10 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
         else:
             auth_status = "success"
             event_type = "keypad_input"
-            msg = f"정상 인증 완료 ({verification['message']})"
+            if verification.get("member_id"):
+                msg = f"정상 인증 완료 ({verification['message']})"
+            else:   # 등록된 패턴이 없거나 간격을 못 잡음 → 비교 없이 입력 완료만 알림
+                msg = f"도어락 비밀번호 입력 완료 ({verification['message']})"
 
         final_confidence = round(0.4 * raw_acoustic_score + 0.6 * pattern_conf, 4)
         breakdown = {
@@ -251,7 +355,9 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
             "beep_count": beep_count,
             "avg_interval_sec": avg_interval,
             "beep_intervals": beep_intervals,
-            "verification": verification  # 집주인 대조 결과 (유사도, 일치 여부)
+            "verification": verification,   # 등록 사용자 대조 결과 (유사도, 일치 여부)
+            "member_id": verification.get("member_id"),
+            "member_name": verification.get("member_name"),
         }
 
     elif top_label in LOCK_TOP_LABELS:
@@ -266,7 +372,8 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
         detail_data = {
             "auth_status": "locked", "typing_speed": "none",
             "beep_count": 0, "avg_interval_sec": 0.0, "beep_intervals": [],
-            "verification": {"is_owner": True, "similarity": 1.0, "status": "locked", "message": "도어락 잠금"}
+            "verification": {"is_owner": True, "similarity": 1.0, "status": "locked", "message": "도어락 잠금"},
+            "member_id": None, "member_name": None,
         }
     else:
         event_type = top_label
@@ -276,7 +383,8 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
         detail_data = {
             "auth_status": "unknown", "typing_speed": "none",
             "beep_count": 0, "avg_interval_sec": 0.0, "beep_intervals": [],
-            "verification": {"is_owner": False, "similarity": 0.0, "status": "none", "message": "일반 음향"}
+            "verification": {"is_owner": False, "similarity": 0.0, "status": "none", "message": "일반 음향"},
+            "member_id": None, "member_name": None,
         }
 
     return {
@@ -309,7 +417,7 @@ if __name__ == "__main__":
     if not wav_files:
         print(f"[알림] '{audio_dir}' 폴더에 .wav 파일이 없습니다.")
     else:
-        print(f"\n총 {len(wav_files)}개 오디오 집주인 타건 패턴 대조 분석 시작\n" + "=" * 75)
+        print(f"\n총 {len(wav_files)}개 오디오 키패드 패턴 대조 분석 시작 (등록 사용자 프로필은 DB에서 읽음)\n" + "=" * 75)
         all_results = []
 
         for fpath in wav_files:

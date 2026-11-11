@@ -8,9 +8,10 @@
 필요 패키지: pip install sounddevice requests   (mic 모드만 sounddevice 필요)
 필요 프로그램: ffmpeg (rtsp / 파일 모드)   brew install ffmpeg
 
-이벤트 형식 (위험 소리 / 키패드 공통):
-  device_id, source("audio"|"keypad"), type, message, confidence,
+이벤트 형식 (위험 소리 / 키패드 공통, vision.py 와 같은 공통 필드):
+  device_id, event_id, source("sound"|"keypad"), type, message, confidence(0~1),
   risk_level("normal"|"warning"|"danger"), timestamp, top_3, detail{...}
+  → notify() → realtime_events.jsonl + risk.judge.on_event (별도 스레드) + (옵션) HTTP
 """
 import argparse
 import datetime
@@ -19,6 +20,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 
 import numpy as np
@@ -40,7 +42,7 @@ HOP_SEC = 2.0             # 분석 주기
 BUFFER_SEC = 60.0         # 키패드 입력 구간을 통째로 꺼내 쓰기 위한 보관 길이
 SILENCE_RMS = 0.005       # 이보다 조용하면 모델 호출 생략 (연산 절약)
 COOLDOWN_SEC = 30         # 같은 위험 상황에서 알림 중복 전송 방지 시간
-SERVER_URL = ""           # 예: "http://localhost:8000/api/events" (비워두면 전송 안 함)
+SERVER_URL = os.getenv("AUDIO_SERVER_URL", "")   # 비워두면 HTTP 전송 안 함
 EVENT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "realtime_events.jsonl")
 
 # ── 도어락 키패드 설정 ──
@@ -65,6 +67,16 @@ LABEL_KO = {
     "Glass": "유리 소리", "Shatter": "유리 깨지는 소리", "Breaking": "파손 소리",
     "Crying, sobbing": "울음소리",
 }
+# AST 라벨 → judge 규칙용 짧은 type (설계 문서 5-2)
+SOUND_TYPE = {
+    "Screaming": "scream", "Shout": "shout", "Yell": "shout",
+    "Glass": "glass_break", "Shatter": "glass_break", "Smash, crash": "glass_break", "Breaking": "glass_break",
+    "Slam": "door_slam", "Bang": "bang", "Thump, thud": "thump", "Crying, sobbing": "crying",
+}
+
+
+def new_event_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 stop = threading.Event()
 finished = threading.Event()   # 파일 재생이 끝났을 때 (테스트용)
@@ -187,14 +199,15 @@ def keypad_risk(res: dict, fail_times: deque) -> str:
 def make_hazard_event(device_id, ts, primary, level, alerts, watch, top3) -> dict:
     return {
         "device_id": device_id,
-        "source": "audio",
-        "type": primary,
+        "event_id": new_event_id("sound"),
+        "source": "sound",
+        "type": SOUND_TYPE.get(primary, primary),
         "message": f"{LABEL_KO.get(primary, primary)} 소리 감지 - {LEVEL_KO[level]}",
         "confidence": watch[primary],
         "risk_level": LEVEL_NAME[level],
         "timestamp": ts,
         "top_3": [{"label": p["label"], "score": round(float(p["score"]), 4)} for p in top3],
-        "detail": {"alerts": alerts, "watch": dict(list(watch.items())[:6])},
+        "detail": {"label": primary, "alerts": alerts, "watch": dict(list(watch.items())[:6])},
     }
 
 
@@ -202,10 +215,11 @@ def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
     # beep_intervals와 집주인 패턴 대조 결과(verification)를 detail에 포함
     keys = (
         "auth_status", "typing_speed", "beep_count", "avg_interval_sec",
-        "beep_intervals", "verification", "confidence_breakdown"
+        "beep_intervals", "verification", "member_id", "member_name", "confidence_breakdown"
     )
     return {
         "device_id": device_id,
+        "event_id": new_event_id("keypad"),
         "source": "keypad",
         "type": res["type"],
         "message": res["message"],
@@ -217,24 +231,12 @@ def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
     }
 
 
-# ── judge 연결용: notify로 나간 이벤트를 최근 RECENT_KEEP_SEC초 동안 메모리에 보관 ──
-RECENT_KEEP_SEC = 10
-_recent = deque()                 # (time.time(), event)
-_recent_lock = threading.Lock()
-
-
-def get_recent(seconds: float = 5) -> list:
-    """최근 seconds초 동안 notify로 나간 이벤트 리스트 (judge가 호출)"""
-    now = time.time()
-    with _recent_lock:
-        return [e for t, e in _recent if now - t <= seconds]
-
-
 def _send_to_judge(event: dict):
     """judge.on_event를 별도 스레드로 호출 → LLM이 느려도 녹음 루프는 안 멈춤"""
     try:
         from risk import judge
-    except ImportError:
+    except ImportError as e:
+        print(f"[경고] risk.judge import 실패: {e}")
         return
     if hasattr(judge, "on_event"):
         threading.Thread(target=judge.on_event, args=(event,), daemon=True).start()
@@ -243,13 +245,7 @@ def _send_to_judge(event: dict):
 def notify(event: dict):
     with open(EVENT_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
-
-    now = time.time()
-    with _recent_lock:
-        _recent.append((now, event))
-        while _recent and now - _recent[0][0] > RECENT_KEEP_SEC:
-            _recent.popleft()
-    _send_to_judge(event)
+    _send_to_judge(event)   # 최근 이벤트 보관·시간 묶기는 judge 가 담당
 
     if SERVER_URL:
         try:
