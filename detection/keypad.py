@@ -12,21 +12,101 @@ try:
 except ImportError:
     from sound import classifier                # detection 폴더에서 단독 실행할 때
 
-# 도어락 물리 잠금음으로 매핑하는 AST 라벨 (기존 규칙 그대로)
 LOCK_TOP_LABELS = ["Single-lens reflex camera", "Mechanisms", "Clicking"]
+PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_profile.json")
 
+
+# ───────────────────────── 1. 집주인 타건 프로필 관리 & 비교 엔진 ─────────────────────────
+
+def load_or_create_owner_profile() -> dict:
+    """
+    집주인의 등록 타건 프로필(Baseline)을 불러옵니다.
+    파일이 없으면 4자리 비밀번호(간격 3개, 평균 0.35초)를 기본 기준선으로 자동 생성합니다.
+    """
+    if os.path.exists(PROFILE_PATH):
+        try:
+            with open(PROFILE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # 기본 집주인 프로필 (4자리 비밀번호 기준: 버튼 사이 간격 3개)
+    default_profile = {
+        "user_name": "집주인_A",
+        "pin_length": 4,
+        "mean_intervals": [0.35, 0.40, 0.32],  # 집주인 고유 타건 리듬
+        "std_intervals": [0.06, 0.08, 0.05],   # 허용 오차 범위
+        "enrolled_count": 5,
+        "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
+        json.dump(default_profile, f, indent=2, ensure_ascii=False)
+    return default_profile
+
+
+def verify_keystroke_pattern(current_intervals: list, profile: dict) -> dict:
+    """
+    현재 입력된 비프음 간격 배열과 등록된 집주인 프로필을 비교하여
+    유사도(0~100%)와 집주인 인증 여부를 판정합니다.
+    """
+    if not current_intervals or len(current_intervals) < 2:
+        return {
+            "is_owner": False,
+            "similarity": 0.0,
+            "status": "insufficient_data",
+            "message": "타건 데이터 부족 (판정 불가)"
+        }
+
+    ref_means = np.array(profile.get("mean_intervals", [0.35, 0.40, 0.32]))
+    ref_stds = np.array(profile.get("std_intervals", [0.06, 0.08, 0.05]))
+    curr = np.array(current_intervals)
+
+    # 1. 자릿수(간격 개수) 불일치: 비밀번호 자릿수부터 다른 경우
+    if len(curr) != len(ref_means):
+        return {
+            "is_owner": False,
+            "similarity": 0.15,
+            "status": "length_mismatch",
+            "message": f"자릿수 불일치 (등록 {len(ref_means)+1}자리 vs 입력 {len(curr)+1}자리)"
+        }
+
+    # 2. 각 구간별 Z-score 오차 계산
+    # 허용 표준편차(최소 0.04초)로 나누어 각 버튼 사이의 시간 차이를 정규화
+    stds_clipped = np.maximum(ref_stds, 0.04)
+    z_scores = np.abs((curr - ref_means) / stds_clipped)
+    avg_z = float(np.mean(z_scores))
+
+    # 3. 유사도 환산 (Z-score가 0이면 100%, 오차가 커질수록 지수 감쇠)
+    similarity = float(np.exp(-0.4 * avg_z))
+    similarity_pct = round(similarity * 100, 1)
+
+    # 70% 이상 일치 시 집주인으로 최종 승인
+    is_owner = similarity >= 0.70
+
+    if is_owner:
+        status = "owner_verified"
+        msg = f"집주인 타건 리듬 일치 (유사도 {similarity_pct}%)"
+    else:
+        status = "rhythm_mismatch"
+        msg = f"타건 리듬 불일치 - 비번 유출/침입 의심 (유사도 {similarity_pct}%)"
+
+    return {
+        "is_owner": is_owner,
+        "similarity": round(similarity, 4),
+        "similarity_pct": similarity_pct,
+        "avg_z_score": round(avg_z, 2),
+        "status": status,
+        "message": msg
+    }
+
+
+# ───────────────────────── 2. 오디오 분석 및 특징 추출 ─────────────────────────
 
 def calculate_pattern_confidence(beep_count: int, intervals: list, speed: str) -> float:
-    """
-    타격 횟수, 간격의 물리적 타당성, 리듬 명확성을 평가하여
-    도어락 키패드 입력 패턴과의 일치도(0.0 ~ 1.0)를 산출합니다.
-    """
     if beep_count < 2 or not intervals:
         return 0.30
 
     score = 0.0
-
-    # 1. 타격 횟수 적합도 (도어락 비밀번호 표준 4~10자리: 40점 만점)
     if 4 <= beep_count <= 10:
         score += 0.40
     elif beep_count in [3, 11, 12]:
@@ -34,12 +114,10 @@ def calculate_pattern_confidence(beep_count: int, intervals: list, speed: str) -
     else:
         score += 0.10
 
-    # 2. 인간 조작 물리 대역 타당성 (0.18초 ~ 2.2초 범위 비율: 30점 만점)
     valid_range = [i for i in intervals if 0.18 <= i <= 2.2]
     ratio = len(valid_range) / len(intervals)
     score += ratio * 0.30
 
-    # 3. 속도 및 리듬 판정의 명확성 (30점 만점)
     if speed == "slow":
         hesitations = sum(1 for i in intervals if i >= 1.2)
         score += min(hesitations * 0.15, 0.30)
@@ -53,20 +131,14 @@ def calculate_pattern_confidence(beep_count: int, intervals: list, speed: str) -
 
 
 def analyze_beep_intervals(data, sample_rate: int):
-    """
-    오디오 배열에서 양 끝 공백을 제외하고 비프음 속도 및 패턴 신뢰도를 계산합니다.
-    (기존에는 wav 경로를 받았지만, 실시간 스트림에서도 쓰도록 배열을 받습니다. 판정 규칙은 동일)
-    """
     try:
         data = np.asarray(data)
         if len(data.shape) > 1:
             data = data.mean(axis=1)
 
-        # 1. 맨 앞 0.2초 마이크 터치 잡음 제외
         start_cut = int(sample_rate * 0.2)
         d_clean = data[start_cut:] if len(data) > start_cut else data
 
-        # 2. 비프음 피크 감지 (0.21초 빠른 연타 보존을 위해 최소 간격 0.15초)
         threshold = np.max(np.abs(d_clean)) * 0.25
         min_distance = int(sample_rate * 0.15)
         peaks, _ = find_peaks(np.abs(d_clean), height=threshold, distance=min_distance)
@@ -76,14 +148,11 @@ def analyze_beep_intervals(data, sample_rate: int):
 
         if beep_count >= 2:
             intervals = list(np.diff(peak_times))
-
-            # 3. 양 끝 공백 제거 (시작 터치 대기 및 마지막 성공/잠금 멜로디)
             if len(intervals) >= 3 and intervals[0] >= 1.2:
                 intervals = intervals[1:]
             if len(intervals) >= 3 and intervals[-1] >= 1.2:
                 intervals = intervals[:-1]
 
-            # 4. 연속 빠른 입력 및 연속 주저함 탐색
             has_consecutive_fast = any(
                 intervals[i] < 0.8 and intervals[i + 1] < 0.8
                 for i in range(len(intervals) - 1)
@@ -104,16 +173,19 @@ def analyze_beep_intervals(data, sample_rate: int):
                 typical_interval = round(float(np.mean(fast_hits)), 2) if fast_hits else round(core_median, 2)
 
             pattern_conf = calculate_pattern_confidence(beep_count, intervals, speed)
+            formatted_intervals = [round(float(i), 3) for i in intervals]
         else:
             typical_interval = 0.0
             speed = "single_or_none"
             pattern_conf = 0.30
+            formatted_intervals = []
 
         return {
             "beep_count": beep_count,
             "avg_interval_sec": typical_interval,
             "typing_speed": speed,
-            "pattern_confidence": pattern_conf
+            "pattern_confidence": pattern_conf,
+            "beep_intervals": formatted_intervals
         }
     except Exception as e:
         print(f"[경고] 비프 분석 실패: {e}")
@@ -121,30 +193,33 @@ def analyze_beep_intervals(data, sample_rate: int):
             "beep_count": 0,
             "avg_interval_sec": 0.0,
             "typing_speed": "unknown",
-            "pattern_confidence": 0.0
+            "pattern_confidence": 0.0,
+            "beep_intervals": []
         }
 
 
 def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: str = "stream") -> dict:
-    """
-    오디오 배열과 AST 상위 3개 예측(predictions)으로 도어락 이벤트를 판정합니다.
-    판정 규칙은 기존 detect_and_save_keypad와 동일하며, 파일 대신 배열을 입력으로 받습니다.
-    """
     top_label = predictions[0]["label"]
     raw_acoustic_score = round(float(predictions[0]["score"]), 4)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
     top_3_labels = [p["label"] for p in predictions]
+    is_keypad_candidate = (top_label == "Beep, bleep") or ("Beep, bleep" in top_3_labels) or ("Alarm clock" in top_3_labels)
 
-    # 1. 키패드 비프음 감지 시
-    if top_label == "Beep, bleep":
+    owner_profile = load_or_create_owner_profile()
+
+    if is_keypad_candidate:
         speed_info = analyze_beep_intervals(data, sample_rate)
         typing_speed = speed_info["typing_speed"]
         beep_count = speed_info["beep_count"]
         avg_interval = speed_info["avg_interval_sec"]
         pattern_conf = speed_info["pattern_confidence"]
+        beep_intervals = speed_info.get("beep_intervals", [])
 
-        has_error_alarm = "Alarm clock" in top_3_labels or beep_count >= 10
+        # ── 비교 엔진 가동: 집주인 타건 패턴과 실시간 대조 ──
+        verification = verify_keystroke_pattern(beep_intervals, owner_profile)
+
+        has_error_alarm = ("Alarm clock" in top_3_labels) or (beep_count >= 10) or (top_label == "Alarm clock")
 
         if has_error_alarm:
             auth_status = "failed"
@@ -153,13 +228,17 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
         elif typing_speed == "slow":
             auth_status = "pending"
             event_type = "keypad_slow_input"
-            msg = f"키패드 입력 지연 감지 (대표 간격 {avg_interval}초 - 유추 의심)"
+            msg = f"키패드 입력 지연 감지 (유추 의심 | {verification['message']})"
+        elif not verification["is_owner"] and verification["status"] == "rhythm_mismatch":
+            # 비밀번호는 맞췄으나 집주인 리듬과 현저히 다른 경우 -> 경고 격상
+            auth_status = "mismatch"
+            event_type = "keypad_anomaly"
+            msg = f"비밀번호 입력 완료되나 타건 패턴 불일치 (도용 의심 | {verification['message']})"
         else:
             auth_status = "success"
             event_type = "keypad_input"
-            msg = f"정상 속도 키패드 입력 감지 (대표 간격 {avg_interval}초)"
+            msg = f"정상 인증 완료 ({verification['message']})"
 
-        # 종합 신뢰도 (음향 모델 40% + 행동 패턴 60%)
         final_confidence = round(0.4 * raw_acoustic_score + 0.6 * pattern_conf, 4)
         breakdown = {
             "acoustic_score": raw_acoustic_score,
@@ -170,46 +249,34 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
             "auth_status": auth_status,
             "typing_speed": typing_speed,
             "beep_count": beep_count,
-            "avg_interval_sec": avg_interval
+            "avg_interval_sec": avg_interval,
+            "beep_intervals": beep_intervals,
+            "verification": verification  # 집주인 대조 결과 (유사도, 일치 여부)
         }
 
-    # 2. 도어락 물리 잠금음 매핑 시
     elif top_label in LOCK_TOP_LABELS:
         event_type = "door_locked"
         msg = "도어락 걸쇠 체결(물리적 잠금음)이 감지되었습니다."
-
-        # 기계음 계열 스코어 합산 후 도어락 도메인 신뢰도로 캘리브레이션
         mechanical_labels = ["Single-lens reflex camera", "Mechanisms", "Clicking", "Scrape", "Door"]
         lock_score = sum(p["score"] for p in predictions if p["label"] in mechanical_labels)
         calibrated_conf = round(min(float(lock_score * 2.2), 0.95), 4)
 
         final_confidence = calibrated_conf
-        breakdown = {
-            "acoustic_score": raw_acoustic_score,
-            "pattern_score": calibrated_conf
-        }
-
+        breakdown = {"acoustic_score": raw_acoustic_score, "pattern_score": calibrated_conf}
         detail_data = {
-            "auth_status": "locked",
-            "typing_speed": "none",
-            "beep_count": 0,
-            "avg_interval_sec": 0.0
+            "auth_status": "locked", "typing_speed": "none",
+            "beep_count": 0, "avg_interval_sec": 0.0, "beep_intervals": [],
+            "verification": {"is_owner": True, "similarity": 1.0, "status": "locked", "message": "도어락 잠금"}
         }
-
-    # 3. 기타 일반 소음
     else:
         event_type = top_label
         msg = f"도어락 주변 음향 감지: {top_label}"
         final_confidence = raw_acoustic_score
-        breakdown = {
-            "acoustic_score": raw_acoustic_score,
-            "pattern_score": 0.0
-        }
+        breakdown = {"acoustic_score": raw_acoustic_score, "pattern_score": 0.0}
         detail_data = {
-            "auth_status": "unknown",
-            "typing_speed": "none",
-            "beep_count": 0,
-            "avg_interval_sec": 0.0
+            "auth_status": "unknown", "typing_speed": "none",
+            "beep_count": 0, "avg_interval_sec": 0.0, "beep_intervals": [],
+            "verification": {"is_owner": False, "similarity": 0.0, "status": "none", "message": "일반 음향"}
         }
 
     return {
@@ -229,7 +296,6 @@ def analyze_keypad_audio(data, sample_rate: int, predictions: list, file_name: s
 
 
 def detect_and_save_keypad(wav_path: str) -> dict:
-    """wav 파일 한 개를 분석합니다. (기존 배치 방식 - 결과 형식 동일)"""
     sample_rate, data = wavfile.read(wav_path)
     predictions = classifier(wav_path, top_k=527)[:3]
     return analyze_keypad_audio(data, sample_rate, predictions, os.path.basename(wav_path))
@@ -243,16 +309,20 @@ if __name__ == "__main__":
     if not wav_files:
         print(f"[알림] '{audio_dir}' 폴더에 .wav 파일이 없습니다.")
     else:
-        print(f"\n총 {len(wav_files)}개 도어락 녹음본 신뢰도 통합 분석 시작\n" + "=" * 70)
+        print(f"\n총 {len(wav_files)}개 오디오 집주인 타건 패턴 대조 분석 시작\n" + "=" * 75)
         all_results = []
 
         for fpath in wav_files:
             res = detect_and_save_keypad(fpath)
             all_results.append(res)
-            print(f"▶ {res['file_name']:<28} | type: {res['type']:<18} | 상태: {res['auth_status']:<7} | 종합신뢰도: {res['confidence']}")
+            v = res.get("verification", {})
+            sim_str = f"{v.get('similarity_pct', 0)}%" if 'similarity_pct' in v else "-"
+            pass_str = "PASS" if v.get("is_owner") else "FAIL"
+
+            print(f"▶ {res['file_name']:<26} | 결과: {res['type']:<16} | 인증: {pass_str} ({sim_str}) | {res['message']}")
 
         output_path = os.path.join(current_dir, "keypad_result.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-        print(f"\n[저장 완료] keypad_result.json이 갱신되었습니다.")
+        print(f"\n[저장 완료] keypad_result.json에 실시간 대조 결과가 반영되었습니다.")
