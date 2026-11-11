@@ -55,7 +55,7 @@ def map_observation(
     # Conservative type selection (priority order)
     if trigger.fall_candidate or trigger.reason == "fall_candidate":
         vtype = "fall"
-        behavior = "가로로 긴 사람 박스가 화면 하단에서 지속 감지됨 (낙상 후보)"
+        behavior = "몸통이 수평에 가까운 누운 자세가 연속 감지됨 (낙상 후보)"
         message = f"사람이 쓰러진 형태로 보입니다 (감지 {n}명)." if n else "낙상 후보가 감지됐습니다."
     elif trigger.reason == "roi_enter" or (
         trigger.roi_hit and trigger.reason in ("person_appear", "person_count_up")

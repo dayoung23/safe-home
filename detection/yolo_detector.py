@@ -2,7 +2,9 @@
 detection/yolo_detector.py — Ultralytics YOLO wrapper (person-centric, conservative)
 
 Stream frames in → structured detections out. No risk judgment.
-Default model: yolov8n.pt (Pi / CPU friendly). Override with YOLO_MODEL env.
+Default model: yolo26n-pose.pt — 사람 박스 + 17개 관절(키포인트). 쓰러짐을 몸통 각도로 판정하기 위함.
+(누운 사람 탐지가 yolov8n-pose 보다 확실함. 구버전 ultralytics 면 yolov8n-pose.pt 로 자동 전환)
+Override with YOLO_MODEL env (일반 yolov8n.pt 도 동작하지만 쓰러짐은 박스 비율로만 판정).
 """
 from __future__ import annotations
 
@@ -18,7 +20,8 @@ PERSON_CLS = 0
 # knife is COCO 43 — only used as a weak "suspicious" hint, never alone as danger
 KNIFE_CLS = 43
 
-DEFAULT_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
+DEFAULT_MODEL = os.getenv("YOLO_MODEL", "yolo26n-pose.pt")
+FALLBACK_MODEL = "yolov8n-pose.pt"
 DEFAULT_CONF = float(os.getenv("YOLO_CONF", "0.50"))
 DEFAULT_IOU = float(os.getenv("YOLO_IOU", "0.45"))
 DEFAULT_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
@@ -32,6 +35,7 @@ class Det:
     conf: float
     xyxy: tuple[float, float, float, float]  # x1,y1,x2,y2
     track_id: int | None = None
+    kpts: Any = None  # pose 모델일 때 (17, 3) = x, y, conf (COCO 키포인트), 아니면 None
 
     @property
     def cx(self) -> float:
@@ -143,7 +147,12 @@ class YoloDetector:
                     "ultralytics 가 필요합니다: pip install ultralytics"
                 ) from e
             print(f"[yolo] loading {self.model_name} (conf={self.conf}, imgsz={self.imgsz})")
-            self._model = YOLO(self.model_name)
+            try:
+                self._model = YOLO(self.model_name)
+            except Exception as e:
+                print(f"[yolo] {self.model_name} 로드 실패({e}) → {FALLBACK_MODEL}")
+                self.model_name = FALLBACK_MODEL
+                self._model = YOLO(self.model_name)
             names = getattr(self._model, "names", None) or {}
             if isinstance(names, dict):
                 self._names = {int(k): str(v) for k, v in names.items()}
@@ -159,6 +168,14 @@ class YoloDetector:
         xyxy = boxes.xyxy.cpu().numpy()
         confs = boxes.conf.cpu().numpy()
         clss = boxes.cls.cpu().numpy().astype(int)
+        kxy = kcf = None
+        kp = getattr(result, "keypoints", None)
+        if kp is not None and getattr(kp, "xy", None) is not None:
+            try:
+                kxy = kp.xy.cpu().numpy()
+                kcf = kp.conf.cpu().numpy() if kp.conf is not None else None
+            except Exception:
+                kxy = kcf = None
         ids = None
         if getattr(boxes, "id", None) is not None:
             try:
@@ -172,12 +189,17 @@ class YoloDetector:
                 continue
             x1, y1, x2, y2 = (float(v) for v in xyxy[i])
             tid = int(ids[i]) if ids is not None else None
+            kpts = None
+            if kxy is not None and i < len(kxy):
+                conf_col = kcf[i][:, None] if kcf is not None else np.ones((kxy.shape[1], 1))
+                kpts = np.concatenate([kxy[i], conf_col], axis=1)
             det = Det(
                 cls_id=cid,
                 label=self._names.get(cid, str(cid)),
                 conf=c,
                 xyxy=(x1, y1, x2, y2),
                 track_id=tid,
+                kpts=kpts,
             )
             if cid == PERSON_CLS:
                 out.persons.append(det)

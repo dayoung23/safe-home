@@ -37,9 +37,9 @@ class TriggerConfig:
     min_interval_sec: float = _env_float("YOLO_COOLDOWN_SEC", 8.0)
     warmup_frames: int = _env_int("YOLO_WARMUP_FRAMES", 10)
     persist_frames: int = _env_int("YOLO_PERSIST_FRAMES", 2)
-    # fall: person bbox wider than tall + center in lower half (heuristic only)
+    # fall: 1순위 pose 키포인트 몸통 각도 / 2순위 박스 비율 (화면 끝에 잘린 사람은 판정 안 함)
     fall_aspect_wh: float = _env_float("YOLO_FALL_ASPECT", 1.15)
-    fall_min_conf: float = _env_float("YOLO_FALL_MIN_CONF", 0.55)
+    fall_min_conf: float = _env_float("YOLO_FALL_MIN_CONF", 0.45)  # 누운 사람은 탐지 신뢰도가 낮게 나옴
     fall_cy_ratio_min: float = _env_float("YOLO_FALL_CY_MIN", 0.45)
     emit_on_appear: bool = True
     emit_on_count_up: bool = True
@@ -112,17 +112,40 @@ class YoloTrigger:
         cx, cy = det.cx / fw, det.cy / fh
         return x1 <= cx <= x2 and y1 <= cy <= y2
 
+    def _lying(self, p, fw: int, fh: int) -> bool | None:
+        """누운 자세면 True, 서/앉음이면 False, 판단 불가면 None.
+
+        1순위: pose 키포인트 — 어깨 중점→엉덩이 중점(몸통)이 수평에 가까우면 누움
+        2순위: 엉덩이가 안 보이면 박스 비율 — 단, 화면 끝에 닿은 사람(캠 앞 근접 상반신)은 판단 안 함
+               (노트북 캠 앞에 앉으면 머리·어깨만 가로로 넓게 잡혀 쓰러짐으로 오인되던 문제 방지)
+        """
+        k = p.kpts
+        if k is not None and len(k) >= 13:
+            sh = [k[i, :2] for i in (5, 6) if k[i, 2] > 0.3]
+            hip = [k[i, :2] for i in (11, 12) if k[i, 2] > 0.3]
+            if sh and hip:
+                s_c = sum(sh) / len(sh)
+                h_c = sum(hip) / len(hip)
+                dx, dy = abs(float(h_c[0] - s_c[0])), abs(float(h_c[1] - s_c[1]))
+                if (dx * dx + dy * dy) ** 0.5 < 0.05 * min(fw, fh):
+                    return None          # 몸통이 너무 작게 잡힘 → 판단 불가
+                return dx > dy           # 몸통이 45도보다 눕혀짐
+        x1, y1, x2, y2 = p.xyxy
+        mx, my = 0.02 * fw, 0.02 * fh
+        if x1 < mx or y1 < my or x2 > fw - mx or y2 > fh - my:
+            return None                  # 잘린 사람 → 판단 불가
+        if p.aspect_wh < self.cfg.fall_aspect_wh:
+            return False
+        return (p.cy / fh) >= self.cfg.fall_cy_ratio_min
+
     def _fall_person(self, dets: FrameDetections) -> bool:
         if not dets.persons or dets.frame_h <= 0:
             return False
         for p in dets.persons:
             if p.conf < self.cfg.fall_min_conf:
                 continue
-            if p.aspect_wh < self.cfg.fall_aspect_wh:
-                continue
-            if (p.cy / dets.frame_h) < self.cfg.fall_cy_ratio_min:
-                continue
-            return True
+            if self._lying(p, dets.frame_w, dets.frame_h) is True:
+                return True
         return False
 
     def force_fire(self, now: float, score: float = 1.0, reason: str = "manual") -> TriggerResult:
