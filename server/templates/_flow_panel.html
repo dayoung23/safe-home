@@ -1,0 +1,24 @@
+<aside class="side left">
+  <div class="panel">
+    <h3><svg class="i"><use href="#i-cpu"/></svg>Safe Home은 이렇게 판단해요<span class="panel-tag">LIVE</span></h3>
+    <p class="desc">이벤트가 들어오면 해당 단계가 실시간으로 켜집니다.</p>
+    <div class="flow" id="flow">
+      <div class="flow-step" data-step="1"><span class="n">1</span><div><b>감지</b><small>소리(AST) · 영상(YOLO 자세) · 도어락 리듬이 각각 이벤트를 보냄</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step" data-step="2"><span class="n">2</span><div><b>사건으로 묶기</b><small>첫 이벤트로 사건을 열고, 직전 10초 + 이후 5초의 이벤트를 하나로 묶음</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step" data-step="3"><span class="n">3</span><div><b>교차 확인</b><small>소리·도어락이 먼저 오면 카메라에 "지금 확인" 요청 → 사람·자세 확인</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step" data-step="4"><span class="n">4</span><div><b>종합 판정 · 알림</b><small>1차 알림 즉시 → 5초 뒤 종합 판정으로 같은 알림 갱신</small></div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3><svg class="i"><use href="#i-activity"/></svg>무엇을 감지하나요</h3>
+    <div class="src-list">
+      <div class="src-item"><svg class="i"><use href="#i-mic"/></svg><div><b>위험 소리</b><small>비명 · 유리 깨짐 · 문 쾅 · 고함</small></div></div>
+      <div class="src-item"><svg class="i"><use href="#i-video"/></svg><div><b>영상 자세</b><small>쓰러짐 · 양손 든 위협 자세 · 현관 진입</small></div></div>
+      <div class="src-item"><svg class="i"><use href="#i-lock"/></svg><div><b>도어락 타건 리듬</b><small>가족별 리듬 학습 → 귀가 / 도용 의심 구분</small></div></div>
+      <div class="src-item"><svg class="i"><use href="#i-eye-off"/></svg><div><b>개인정보</b><small>영상은 저장하지 않고 메모리에서만 분석</small></div></div>
+    </div>
+  </div>
+</aside>

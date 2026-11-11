@@ -152,6 +152,11 @@ def update_alert(alert_id, **fields):
     return _clean(doc)
 
 
+def clear_alerts():
+    """시연용: 알림 전체 삭제 → 지운 개수."""
+    return alerts.delete_many({}).deleted_count
+
+
 def get_recent_alerts(limit=20):
     """최근 알림 (최신순). 대시보드가 1.5초마다 호출."""
     cursor = alerts.find().sort("created_at", DESCENDING).limit(limit)

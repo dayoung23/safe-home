@@ -1,79 +1,73 @@
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<title>Safe Home 대시보드</title>
-<style>
-  body { font-family: sans-serif; max-width: 640px; margin: 30px auto; }
-  header { display: flex; justify-content: space-between; align-items: center; }
-  .card { border-radius: 8px; padding: 12px; margin: 10px 0; border-left: 8px solid #999; background: #f4f4f4; }
-  .위험 { border-color: #d32f2f; background: #fdecea; }
-  .주의 { border-color: #f9a825; background: #fff8e1; }
-  .안전 { border-color: #388e3c; background: #e8f5e9; }
-  .meta { color: #666; font-size: 12px; }
-</style>
-</head>
-<body>
-<header>
-  <div id="me">불러오는 중...</div>
-  <div>
-    <a href="/keypad">키패드 등록</a>
-    <button id="logout">로그아웃</button>
+{% extends "base.html" %}
+{% block title %}Safe Home{% endblock %}
+{% block auth %}1{% endblock %}
+{% block left %}{% include "_flow_panel.html" %}{% endblock %}
+{% block screen %}
+<div class="page">
+  <div class="topbar">
+    <div class="hello"><small id="homeName">우리 집 · 홈캠</small><strong id="greet">안녕하세요</strong></div>
+    <button class="icon-btn" id="bellBtn" aria-label="알림"><svg class="i"><use href="#i-bell"/></svg><span class="dot" id="bellDot" hidden>0</span></button>
   </div>
-</header>
 
-<h2>알림</h2>
-<div id="alerts">알림이 없어요</div>
+  <section class="hero safe" id="hero">
+    <div class="hero-icon"><svg class="i" id="heroIcon"><use href="#i-shield-check"/></svg></div>
+    <div><h2 id="heroTitle">우리 집은 안전해요</h2><p id="heroText">소리 · 영상 · 도어락이 지켜보고 있어요</p></div>
+  </section>
 
-<script>
-const $ = (id) => document.getElementById(id);
+  <section class="card cam">
+    <div class="cam-view" id="camView">
+      <img id="camImg" alt="홈캠 화면" hidden>
+      <div class="cam-empty" id="camEmpty">
+        <svg class="i"><use href="#i-video"/></svg><br>
+        카메라 화면을 불러오는 중이에요<br>
+        <small>서버 카메라 → <code>static/camera/live.jpg</code><br>캡처 이미지 → <code>static/camera/capture.jpg</code></small>
+      </div>
+      <span class="cam-badge" id="camBadge" hidden>LIVE</span>
+      <div class="cam-meta" id="camMeta" hidden><span>거실 홈캠</span><span id="camTime"></span></div>
+    </div>
+    <div class="cam-foot">
+      <div><strong>거실 홈캠</strong> <span class="muted" id="camState">· 연결 확인 중</span></div>
+      <span class="privacy"><svg class="i sm"><use href="#i-eye-off"/></svg>영상 저장 안 함</span>
+    </div>
+  </section>
 
-function goLoginIf401(res) {
-  if (res.status === 401) { location.href = "/login"; return true; }
-  return false;
-}
+  <section class="sensors">
+    <div class="sensor" id="sn-vision"><div class="sensor-ic"><svg class="i"><use href="#i-video"/></svg></div><b>카메라</b><span>대기 중</span></div>
+    <div class="sensor" id="sn-sound"><div class="sensor-ic"><svg class="i"><use href="#i-mic"/></svg></div><b>마이크</b><span>대기 중</span></div>
+    <div class="sensor" id="sn-keypad"><div class="sensor-ic"><svg class="i"><use href="#i-lock"/></svg></div><b>도어락</b><span>대기 중</span></div>
+  </section>
 
-async function loadMe() {
-  const res = await fetch("/api/me");
-  if (goLoginIf401(res)) return;
-  const me = await res.json();
-  $("me").textContent = `${me.name}님 (${me.username}) · 키패드 샘플 ${me.sample_count}개`;
-}
-
-function line(text, cls) {
-  const div = document.createElement("div");
-  if (cls) div.className = cls;
-  div.textContent = text;          // textContent → 메시지에 HTML이 섞여도 안전
-  return div;
-}
-
-async function loadAlerts() {
-  const res = await fetch("/api/alerts");
-  if (goLoginIf401(res)) return;
-  const list = await res.json();
-  if (!Array.isArray(list)) return;   // {"ok":false,...} 오류 응답
-  const box = $("alerts");
-  box.innerHTML = "";
-  if (list.length === 0) { box.textContent = "알림이 없어요"; return; }
-  for (const a of list) {
-    const card = document.createElement("div");
-    card.className = "card " + a.level;
-    card.appendChild(line(`[${a.level}] ${a.message}`));
-    if (a.reason) card.appendChild(line("근거: " + a.reason));
-    if (a.action) card.appendChild(line("추천 행동: " + a.action));
-    card.appendChild(line(`${a.updated_at} · ${(a.sources || []).join(", ")}`, "meta"));
-    box.appendChild(card);
-  }
-}
-
-$("logout").onclick = async () => {
-  await fetch("/api/logout", { method: "POST" });
-  location.href = "/login";
-};
-
-loadMe();
-loadAlerts();
-setInterval(loadAlerts, 1500);
-</script>
-</body>
-</html>
+  <div class="section-title" id="alertsTop">
+    <h2>최근 알림</h2>
+    <div class="filters" id="filters">
+      <button class="on" data-f="all">전체</button><button data-f="위험">위험</button><button data-f="주의">주의</button><button data-f="안전">안전</button>
+    </div>
+  </div>
+  <div class="alert-list" id="alertList">
+    <div class="empty"><svg class="i"><use href="#i-shield-check"/></svg><br>아직 알림이 없어요<br><small>위험이 감지되면 바로 알려드릴게요</small></div>
+  </div>
+</div>
+{% endblock %}
+{% block nav %}{% with active='home' %}{% include "_nav.html" %}{% endwith %}{% endblock %}
+{% block overlays %}
+<div class="sheet-bg" id="sheetBg"></div>
+<div class="sheet" id="sheet">
+  <div class="grabber"></div>
+  <div class="sheet-head lv-안전" id="sheetHead">
+    <div class="lv-ic"><svg class="i"><use href="#i-alert"/></svg></div>
+    <div><div class="alert-top"><span class="lv-tag" id="shLevel">안전</span><span class="stage-tag" id="shStage"></span></div><h3 id="shTitle"></h3><small id="shTime"></small></div>
+  </div>
+  <div class="evidence"><h4>감지 근거</h4><div id="shLines"></div></div>
+  <div class="action-box" id="shActionBox"><svg class="i"><use href="#i-info"/></svg><span id="shAction"></span></div>
+  <div class="sheet-actions" id="shActions">
+    <button class="btn danger" data-act="call"><svg class="i"><use href="#i-phone"/></svg>112 신고</button>
+    <button class="btn ghost" data-act="share"><svg class="i"><use href="#i-send"/></svg>보호자 공유</button>
+    <button class="btn light wide" data-act="ack"><svg class="i"><use href="#i-check"/></svg>확인했어요</button>
+  </div>
+</div>
+{% endblock %}
+{% block side %}{% include "_demo_panel.html" %}{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='demo.js') }}"></script>
+{% endblock %}

@@ -41,11 +41,14 @@ class TriggerConfig:
     fall_aspect_wh: float = _env_float("YOLO_FALL_ASPECT", 1.15)
     fall_min_conf: float = _env_float("YOLO_FALL_MIN_CONF", 0.45)  # 누운 사람은 탐지 신뢰도가 낮게 나옴
     fall_cy_ratio_min: float = _env_float("YOLO_FALL_CY_MIN", 0.45)
+    # 손 들기(위협·협박 자세): 양 손목이 머리(코) 위에 있는 프레임이 연속 N번
+    hands_up_frames: int = _env_int("YOLO_HANDSUP_FRAMES", 3)
+    emit_on_hands_up: bool = True
     emit_on_appear: bool = True
     emit_on_count_up: bool = True
     emit_on_fall: bool = True
-    # ROI as normalized x1,y1,x2,y2 (0..1). Empty = disabled.
-    # Example: YOLO_ROI=0.0,0.0,0.35,1.0 for left doorway strip
+    # 현관 구역(ROI) x1,y1,x2,y2 (0~1 비율). 비우면 사용 안 함.
+    # 예: YOLO_ROI=0.0,0.0,0.3,1.0  → 화면 왼쪽 30% 를 현관으로 간주
     roi: tuple[float, float, float, float] | None = None
     emit_roi_enter: bool = True
 
@@ -59,6 +62,7 @@ class TriggerResult:
     fall_candidate: bool = False
     roi_hit: bool = False
     knife_hint: bool = False
+    hands_up: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -93,6 +97,9 @@ class YoloTrigger:
         self._seen_ids: set[int] = set()
         self._in_roi_ids: set[int] = set()
         self._fall_streak = 0
+        self._hands_streak = 0
+        self._roi_streak = 0
+        self._last_fire_by: dict[str, float] = {}
 
     def reset(self) -> None:
         self._frame_i = 0
@@ -103,6 +110,9 @@ class YoloTrigger:
         self._seen_ids.clear()
         self._in_roi_ids.clear()
         self._fall_streak = 0
+        self._hands_streak = 0
+        self._roi_streak = 0
+        self._last_fire_by = {}
 
     def _in_roi(self, det, fw: int, fh: int) -> bool:
         roi = self.cfg.roi
@@ -138,6 +148,25 @@ class YoloTrigger:
             return False
         return (p.cy / fh) >= self.cfg.fall_cy_ratio_min
 
+    @staticmethod
+    def _hands_up_person(p) -> bool:
+        """양 손목(9,10)이 머리 높이(코, 없으면 어깨보다 위)보다 위에 있으면 손 든 자세."""
+        k = p.kpts
+        if k is None or len(k) < 11:
+            return False
+        if k[9, 2] < 0.3 or k[10, 2] < 0.3:
+            return False
+        if k[0, 2] > 0.3:
+            head_y = float(k[0, 1])                         # 코
+        elif k[5, 2] > 0.3 and k[6, 2] > 0.3:
+            head_y = float(min(k[5, 1], k[6, 1])) - 0.15 * p.height   # 어깨보다 조금 위
+        else:
+            return False
+        return float(k[9, 1]) < head_y and float(k[10, 1]) < head_y
+
+    def _hands_up(self, dets: FrameDetections) -> bool:
+        return any(self._hands_up_person(p) for p in dets.persons)
+
     def _fall_person(self, dets: FrameDetections) -> bool:
         if not dets.persons or dets.frame_h <= 0:
             return False
@@ -171,6 +200,7 @@ class YoloTrigger:
         tr.person_count = dets.person_count
         tr.fall_candidate = self._fall_person(dets)
         tr.knife_hint = any(o.cls_id == 43 for o in dets.others)
+        tr.hands_up = self._hands_up(dets)
         tr.roi_hit = bool(
             self.cfg.roi
             and any(self._in_roi(p, dets.frame_w, dets.frame_h) for p in dets.persons)
@@ -189,6 +219,13 @@ class YoloTrigger:
         else:
             self._fall_streak = 0
         fall_ok = fall and self._fall_streak >= self.cfg.persist_frames
+        hands = self._hands_up(dets)
+        self._hands_streak = self._hands_streak + 1 if hands else 0
+        hands_ok = hands and self._hands_streak >= max(self.cfg.hands_up_frames, 1)
+        # 현관 구역: "구역 안에 사람 있음" 상태가 persist 프레임 이어진 순간 = 진입 (추적 기능 없이도 동작)
+        in_roi_now = bool(self.cfg.roi) and any(
+            self._in_roi(p, dets.frame_w, dets.frame_h) for p in dets.persons)
+        self._roi_streak = self._roi_streak + 1 if in_roi_now else 0
 
         if count > 0:
             self._streak_person += 1
@@ -203,33 +240,26 @@ class YoloTrigger:
         if self._streak_person >= self.cfg.persist_frames:
             self._stable_count = count
 
-        roi_enter = False
+        roi_enter = self._roi_streak == self.cfg.persist_frames
         new_ids: list[int] = []
         if dets.persons:
             for p in dets.persons:
                 if p.track_id is not None:
                     if p.track_id not in self._seen_ids and self._streak_person >= self.cfg.persist_frames:
                         new_ids.append(p.track_id)
-                    if self._in_roi(p, dets.frame_w, dets.frame_h):
-                        if p.track_id not in self._in_roi_ids and self.cfg.roi:
-                            roi_enter = True
-                        self._in_roi_ids.add(p.track_id)
                     if self._streak_person >= self.cfg.persist_frames:
                         self._seen_ids.add(p.track_id)
-            # also ROI without track ids: count-based enter
-            if self.cfg.roi and not any(p.track_id is not None for p in dets.persons):
-                in_now = any(self._in_roi(p, dets.frame_w, dets.frame_h) for p in dets.persons)
-                if in_now and self._streak_person == self.cfg.persist_frames:
-                    roi_enter = True
 
         if self._frame_i <= self.cfg.warmup_frames:
             self._last_count = self._stable_count
             return TriggerResult(False, score, "warmup", person_count=count, knife_hint=knife)
 
-        # decide reason (priority: fall > roi > appear/count)
+        # decide reason (priority: fall > hands_up > roi > appear/count)
         reason = ""
         if self.cfg.emit_on_fall and fall_ok:
             reason = "fall_candidate"
+        elif self.cfg.emit_on_hands_up and hands_ok:
+            reason = "hands_up"
         elif self.cfg.emit_roi_enter and roi_enter:
             reason = "roi_enter"
         elif self.cfg.emit_on_appear and self._last_count == 0 and stable >= 1:
@@ -248,13 +278,13 @@ class YoloTrigger:
                 "stable" if stable else "no_person",
                 person_count=stable,
                 fall_candidate=fall_ok,
-                roi_hit=bool(self.cfg.roi and any(
-                    self._in_roi(p, dets.frame_w, dets.frame_h) for p in dets.persons
-                )),
+                roi_hit=in_roi_now,
                 knife_hint=knife,
+                hands_up=hands_ok,
             )
 
-        if now - self._last_fire_t < self.cfg.min_interval_sec:
+        # 쿨다운은 이유별로 따로 (사람 등장 직후에 손 들기·쓰러짐이 와도 막히지 않게)
+        if now - self._last_fire_by.get(reason, -1e9) < self.cfg.min_interval_sec:
             self._last_count = stable
             return TriggerResult(
                 False,
@@ -267,6 +297,7 @@ class YoloTrigger:
             )
 
         self._last_fire_t = now
+        self._last_fire_by[reason] = now
         self._last_count = stable
         return TriggerResult(
             True,
@@ -276,5 +307,6 @@ class YoloTrigger:
             fall_candidate=fall_ok,
             roi_hit=(reason == "roi_enter"),
             knife_hint=knife,
+            hands_up=hands_ok,
             detail={"new_track_ids": new_ids},
         )

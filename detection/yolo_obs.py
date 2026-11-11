@@ -23,7 +23,7 @@ except ImportError:
     from yolo_detector import FrameDetections
     from yolo_trigger import TriggerResult
 
-VISION_TYPES = ("person", "fall", "intruder", "suspicious", "fire", "motion", "none")
+VISION_TYPES = ("person", "fall", "threat", "entry", "intruder", "suspicious", "fire", "motion", "none")
 DEFAULT_SCENE = os.getenv("VISION_SCENE", "")
 
 
@@ -57,12 +57,16 @@ def map_observation(
         vtype = "fall"
         behavior = "몸통이 수평에 가까운 누운 자세가 연속 감지됨 (낙상 후보)"
         message = f"사람이 쓰러진 형태로 보입니다 (감지 {n}명)." if n else "낙상 후보가 감지됐습니다."
+    elif trigger.hands_up or trigger.reason == "hands_up":
+        vtype = "threat"
+        behavior = "양손을 머리 위로 든 자세가 연속 감지됨 (협박·위협 상황 후보)"
+        message = f"사람이 양손을 머리 위로 들고 있습니다 (감지 {n}명)."
     elif trigger.reason == "roi_enter" or (
         trigger.roi_hit and trigger.reason in ("person_appear", "person_count_up")
     ):
-        vtype = "suspicious"
-        behavior = "설정 ROI 구간으로 사람이 들어옴"
-        message = f"관심 구역에 사람 {n}명이 감지됐습니다."
+        vtype = "entry"
+        behavior = "현관(지정 구역)으로 사람이 들어옴"
+        message = f"현관으로 사람이 들어왔습니다 ({n}명)."
     elif trigger.knife_hint and n >= 1:
         vtype = "suspicious"
         behavior = "사람과 함께 knife 객체가 함께 탐지됨 (약한 단서)"

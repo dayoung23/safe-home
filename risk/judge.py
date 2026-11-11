@@ -17,10 +17,12 @@ risk/judge.py — 관측 이벤트를 "사건"으로 묶어 위험 등급을 정
 묶는 기준은 event_id 가 아니라 "같은 device_id + 시간" (소리와 영상은 id 를 공유하지 않음)
 
 등급 규칙 (evaluate)
-  화재 소리/영상 → 위험 · 영상 fall / intruder → 위험
+  화재 소리/영상 → 위험 · 영상 fall / intruder → 위험 · 영상 threat(양손 든 위협 자세) → 위험
   키패드 이상 + 영상 사람 → 위험 · 위험 소리(비명·유리) + 영상 사람 → 위험 · 키패드 오류 반복 → 위험
   영상 suspicious → 주의 · 위험 소리 단독 / 키패드 이상 단독 → 주의 · 큰 소리 + 사람 → 주의
   정상 키패드 + 영상 사람 → 안전 (귀가)
+  영상 entry(현관 진입) 단독 → ENTRY_WAIT_SEC 동안 키패드 결과를 기다린 뒤에도 없으면 주의
+    (키패드 정상 → 귀가 / 키패드 이상 → 위험 으로 위 규칙이 먼저 처리)
   그 외 (사람만 보임, 정상 생활, 큰 소리만) → 알림 없음, 기록만
 """
 from __future__ import annotations
@@ -43,16 +45,21 @@ FINALIZE_SEC = 5.0         # 사건 창: 첫 이벤트 후 이만큼 모아서 �
 LOOKBACK_SEC = 10.0        # 사건이 열리기 직전 이만큼의 이벤트도 같은 사건에 포함
 JOIN_WINDOW_SEC = 30.0     # 마지막 이벤트 후 이 시간이 지나면 사건 종료
 HISTORY_SEC = 60.0
+ENTRY_WAIT_SEC = 8.0       # 현관 진입 후 도어락 인증(키패드) 결과를 기다리는 시간
+ENTRY_ALONE = "도어락 인증 없이 현관으로 사람이 들어왔어요"
 
 RANK = {"안전": 0, "주의": 1, "위험": 2}
 DANGER_SOUNDS = {"scream", "glass_break", "fire_alarm"}
 BAD_KEYPAD = {"keypad_failed", "keypad_anomaly", "keypad_slow_input"}
-PERSON_LIKE = {"person", "suspicious", "intruder"}
+PERSON_LIKE = {"person", "suspicious", "intruder", "threat", "entry"}
 
 _lock = threading.Lock()
 _history: dict[str, deque] = {}             # device_id → deque[(t, event)]
 _incident: dict[str, dict[str, Any]] = {}   # device_id → 열린 사건
 _seq = 0
+_last_save: dict[str, float] = {}           # device_id → 마지막 알림 저장 시각
+_recent: deque = deque(maxlen=60)           # 대시보드 디버그용: 최근 이벤트 + 판단 결과
+_last_by_source: dict[str, dict[str, Any]] = {}   # 센서 상태 표시용: 소스별 마지막 이벤트
 
 
 # ───────────────────────── 유틸 ─────────────────────────
@@ -117,6 +124,8 @@ def evaluate(parts: dict[str, dict[str, Any]]) -> tuple[str | None, str]:
         return "위험", "사람이 쓰러진 것 같아요"
     if vt == "intruder":
         return "위험", "침입이 의심돼요"
+    if vt == "threat":
+        return "위험", "양손을 든 위협 자세가 계속돼요 (협박 상황 의심)"
     if keypad_bad and person:
         return "위험", "도어락 이상 입력 뒤 사람이 확인됐어요"
     if sound_danger and person:
@@ -135,6 +144,8 @@ def evaluate(parts: dict[str, dict[str, Any]]) -> tuple[str | None, str]:
         return "주의", "큰 소리와 함께 사람이 확인됐어요"
     if kt == "keypad_input" and person:
         return "안전", "등록된 리듬으로 도어락이 열리고 사람이 들어왔어요 (귀가)"
+    if vt == "entry":
+        return "주의", ENTRY_ALONE
     return None, ""
 
 
@@ -171,6 +182,10 @@ def _finalize(device: str, inc_id: int) -> None:
                 action=action, sources=sorted(parts))
         _log({"finalize": device, "alert_id": inc["alert_id"], "level": level,
               "reason": title, "sources": sorted(parts)})
+        now = time.time()
+        _recent.append({"t": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                        "source": "judge", "type": "final", "message": title[:80],
+                        "action": "final", "level": level, "demo": False})
     print(f"[judge] 사건 최종 판정 [{level}] {message[:70]}")
 
 
@@ -216,21 +231,82 @@ def on_event(event: dict[str, Any]) -> None:
             level, reason = evaluate(parts)
             if level is None:
                 decision["action"] = "record"      # 정상 생활 → 기록만
+            elif reason == ENTRY_ALONE:
+                # 현관 진입만 있음 → 바로 침입으로 단정하지 않고 도어락 결과를 잠시 기다림
+                t = threading.Timer(ENTRY_WAIT_SEC, _entry_check, args=(device, now))
+                t.daemon = True
+                t.start()
+                decision["action"] = "wait_keypad"
+                print(f"[judge] 현관 진입 → 도어락 인증 {int(ENTRY_WAIT_SEC)}초 대기")
             else:
-                title = reason if level == "안전" else f"{reason} (확인 중)"
-                message, action = compose(level, title, parts)
-                alert_id = _save(level, message, title, action, sorted(parts))
+                alert_id = _open(device, level, reason, parts, now)
                 decision.update(action="save", alert_id=alert_id, level=level)
-                print(f"[judge] 새 알림 [{level}] {message[:70]}")
-                if level != "안전":                  # 귀가 알림은 사건을 열지 않음
-                    _seq += 1
-                    _incident[device] = {"id": _seq, "alert_id": alert_id, "level": level,
-                                         "reason": reason, "since": now - LOOKBACK_SEC,
-                                         "t_open": now, "t_last": now, "final": False}
-                    t = threading.Timer(FINALIZE_SEC, _finalize, args=(device, _seq))
-                    t.daemon = True
-                    t.start()
-                    if "vision" not in parts:
-                        _request_vision(src)
+                if level != "안전" and "vision" not in parts:
+                    _request_vision(src)
 
         _log({"event": event, "decision": decision})
+        _recent.append({
+            "t": now, "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "source": src, "type": event.get("type"), "message": str(event.get("message") or "")[:80],
+            "action": decision.get("action"), "level": decision.get("level"),
+            "demo": bool((event.get("detail") or {}).get("demo")),
+        })
+        _last_by_source[src] = {"t": now, "type": event.get("type"), "message": str(event.get("message") or "")[:80]}
+
+
+def snapshot(limit: int = 30) -> dict[str, Any]:
+    """대시보드용 상태: 센서별 마지막 이벤트(몇 초 전) + 최근 판단 기록 + 열린 사건."""
+    now = time.time()
+    with _lock:
+        sensors = {s: {**v, "ago": round(now - v["t"], 1)} for s, v in _last_by_source.items()}
+        recent = list(_recent)[-limit:][::-1]
+        incidents = [{"device": d, "level": i["level"], "reason": i["reason"], "final": i["final"],
+                      "age": round(now - i["t_open"], 1)}
+                     for d, i in _incident.items() if now - i["t_last"] <= JOIN_WINDOW_SEC]
+    return {"sensors": sensors, "recent": recent, "incidents": incidents,
+            "window_sec": FINALIZE_SEC}
+
+
+def reset(clear_log: bool = True) -> None:
+    """시연용: 기억하고 있는 이벤트·사건을 비움 (clear_log=False 면 화면용 판단 로그는 남김)."""
+    with _lock:
+        _history.clear()
+        _incident.clear()
+        _last_save.clear()
+        if clear_log:
+            _recent.clear()
+            _last_by_source.clear()
+
+
+def _open(device: str, level: str, reason: str, parts: dict, now: float):
+    """새 알림 저장 (+ 안전이 아니면 사건 창 열기). _lock 을 잡은 상태에서 호출."""
+    global _seq
+    title = reason if level == "안전" else f"{reason} (확인 중)"
+    message, action = compose(level, title, parts)
+    alert_id = _save(level, message, title, action, sorted(parts))
+    _last_save[device] = now
+    print(f"[judge] 새 알림 [{level}] {message[:70]}")
+    if level != "안전":                  # 귀가 알림은 사건을 열지 않음
+        _seq += 1
+        _incident[device] = {"id": _seq, "alert_id": alert_id, "level": level,
+                             "reason": reason, "since": now - LOOKBACK_SEC,
+                             "t_open": now, "t_last": now, "final": False}
+        t = threading.Timer(FINALIZE_SEC, _finalize, args=(device, _seq))
+        t.daemon = True
+        t.start()
+    return alert_id
+
+
+def _entry_check(device: str, t_entry: float) -> None:
+    """현관 진입 ENTRY_WAIT_SEC 후: 그 사이 다른 판정(귀가·도어락 이상 등)이 없었으면 주의 알림."""
+    with _lock:
+        now = time.time()
+        inc = _incident.get(device)
+        if (inc and now - inc["t_last"] <= JOIN_WINDOW_SEC) or _last_save.get(device, 0) >= t_entry:
+            return                       # 이미 다른 이벤트로 처리됨
+        parts = _parts(device, t_entry - LOOKBACK_SEC)
+        level, reason = evaluate(parts)
+        if level is None:
+            return
+        _open(device, level, reason, parts, now)
+        _log({"entry_check": device, "level": level, "reason": reason, "sources": sorted(parts)})

@@ -27,6 +27,13 @@ def register_page():
     return render_template("register.html")
 
 
+@bp.get("/settings")
+def settings_page():
+    if not _logged_in():
+        return redirect(url_for("pages.login_page"))
+    return render_template("settings.html")
+
+
 @bp.get("/keypad")
 def keypad_page():
     if not _logged_in():

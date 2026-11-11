@@ -12,6 +12,7 @@ from flask import Flask, jsonify, request
 from db import database
 from server.routes.alerts import bp as alerts_bp
 from server.routes.auth import bp as auth_bp
+from server.routes.demo import bp as demo_bp
 from server.routes.pages import bp as pages_bp
 
 app = Flask(__name__)
@@ -24,6 +25,7 @@ database.init_db()
 app.register_blueprint(pages_bp)   # /, /register
 app.register_blueprint(auth_bp)    # /api/register, /api/register/status, /api/users
 app.register_blueprint(alerts_bp)  # /api/alerts
+app.register_blueprint(demo_bp)    # /api/status, /api/demo/* (시연·디버그용)
 
 
 @app.errorhandler(404)

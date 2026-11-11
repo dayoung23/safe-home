@@ -8,3 +8,5 @@ __pycache__/
 *.pt
 detection/audio_result.json
 detection/keypad_result.json
+server/static/camera/live.jpg
+server/static/camera/*.tmp.jpg

@@ -49,6 +49,26 @@ STUB_DELAY_SEC = float(os.getenv("VISION_STUB_DELAY", "0.4"))
 SERVER_URL = os.getenv("VISION_SERVER_URL", "")
 FIXED_FIXTURE = os.getenv("VISION_FIXTURE", "")
 EVENT_LOG = Path(__file__).resolve().parent / "vision_events.jsonl"
+# 웹 대시보드용 카메라 화면: N초마다 박스 그린 프레임 1장을 덮어씀 (0 이면 끔).
+# 브라우저는 서버 PC 카메라를 직접 못 여니까, 서버가 이 파일을 갱신하고 웹은 이 이미지를 보여줌.
+SNAPSHOT_SEC = float(os.getenv("VISION_SNAPSHOT_SEC", "1.0"))
+SNAPSHOT_PATH = Path(__file__).resolve().parents[1] / "server" / "static" / "camera" / "live.jpg"
+
+
+def _write_snapshot(vis) -> None:
+    """임시 파일에 쓰고 교체 → 웹이 반쯤 쓴 파일을 읽지 않게."""
+    import cv2
+
+    try:
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        h, w = vis.shape[:2]
+        if w > 640:
+            vis = cv2.resize(vis, (640, int(h * 640 / w)))
+        tmp = SNAPSHOT_PATH.with_suffix(".tmp.jpg")
+        cv2.imwrite(str(tmp), vis, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        os.replace(tmp, SNAPSHOT_PATH)
+    except Exception:
+        pass   # 윈도우에서 웹이 읽는 중이면 교체 실패할 수 있음 → 다음 주기에 다시
 DEFAULT_MODE = os.getenv("VISION_MODE", "yolo")
 
 stop = threading.Event()
@@ -264,10 +284,21 @@ def _new_detector(prev: YoloDetector | None = None) -> YoloDetector:
     )
 
 
-def _draw_preview(frame, dets: FrameDetections, reason: str, score: float, fall: bool):
+def _draw_preview(frame, dets: FrameDetections, reason: str, score: float, fall: bool,
+                  roi=None, hands_up: bool = False):
     import cv2
 
     vis = frame.copy()
+    h, w = vis.shape[:2]
+    if roi:   # 현관 구역 (YOLO_ROI) 표시 → 위치 맞출 때 참고
+        x1, y1, x2, y2 = roi
+        cv2.rectangle(vis, (int(x1 * w), int(y1 * h)), (int(x2 * w), int(y2 * h)), (255, 128, 0), 2)
+        cv2.putText(vis, "DOOR ZONE", (int(x1 * w) + 6, int(y1 * h) + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 128, 0), 2)
+    if hands_up:
+        cv2.putText(vis, "HANDS UP", (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    if fall:
+        cv2.putText(vis, "FALL", (12, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
     for p in dets.persons:
         x1, y1, x2, y2 = (int(v) for v in p.xyxy)
         color = (0, 165, 255) if fall else (0, 255, 0)
@@ -335,6 +366,7 @@ def run(
     )
 
     frame_i = 0
+    last_snapshot = 0.0
     try:
         while not stop.is_set():
             t_loop = time.monotonic()
@@ -371,8 +403,14 @@ def run(
 
             fired, score, reason = tr.fired, tr.score, tr.reason
 
+            if SNAPSHOT_SEC > 0 and now - last_snapshot >= SNAPSHOT_SEC:
+                last_snapshot = now
+                _write_snapshot(_draw_preview(frame, dets, reason, score, tr.fall_candidate,
+                                              roi=trigger.cfg.roi, hands_up=tr.hands_up))
+
             if preview:
-                vis = _draw_preview(frame, dets, reason, score, tr.fall_candidate)
+                vis = _draw_preview(frame, dets, reason, score, tr.fall_candidate,
+                                    roi=trigger.cfg.roi, hands_up=tr.hands_up)
                 cv2.imshow("vision-yolo", vis)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):

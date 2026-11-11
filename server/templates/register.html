@@ -1,44 +1,43 @@
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<title>Safe Home 회원가입</title>
-<style>
-  body { font-family: sans-serif; max-width: 360px; margin: 60px auto; }
-  input, button { display: block; width: 100%; margin: 6px 0; padding: 8px; box-sizing: border-box; }
-  #msg { color: #c00; }
-</style>
-</head>
-<body>
-<h2>회원가입</h2>
-<input id="username" placeholder="아이디 (20자 이내)">
-<input id="password" type="password" placeholder="비밀번호 (4자 이상)">
-<input id="name" placeholder="이름 (알림에 표시돼요)">
-<button id="btn">가입하기</button>
-<p id="msg"></p>
-<p><a href="/login">로그인으로</a></p>
-
+{% extends "base.html" %}
+{% block title %}Safe Home · 회원가입{% endblock %}
+{% block screen %}
+<div class="page auth">
+  <a class="back" href="/login"><svg class="i"><use href="#i-left"/></svg>로그인</a>
+  <div class="brand" style="margin-top:6px">
+    <h1>회원가입</h1>
+    <p>가족 모두가 같은 집을 지킬 수 있어요.<br>가입 후 도어락 리듬을 등록하면 귀가를 알아봐요.</p>
+  </div>
+  <form id="form" autocomplete="off">
+    <div class="field"><label for="name">이름</label><input id="name" maxlength="20" placeholder="알림에 표시될 이름"></div>
+    <div class="field"><label for="username">아이디</label><input id="username" maxlength="20" placeholder="20자 이내"></div>
+    <div class="field"><label for="password">비밀번호</label><input id="password" type="password" placeholder="4자 이상"></div>
+    <div class="field"><label for="password2">비밀번호 확인</label><input id="password2" type="password" placeholder="한 번 더 입력"></div>
+    <div class="form-msg" id="msg"></div>
+    <button class="btn primary block" id="btn" type="submit">가입하고 시작하기</button>
+  </form>
+  <div class="auth-foot">이미 계정이 있나요? <a href="/login">로그인</a></div>
+</div>
+{% endblock %}
+{% block scripts %}
 <script>
-const $ = (id) => document.getElementById(id);
-
-$("btn").onclick = async () => {
-  const res = await fetch("/api/register", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: $("username").value,
-      password: $("password").value,
-      name: $("name").value,
-    }),
-  });
-  const data = await res.json();
-  if (data.ok) {
-    alert("가입 완료! 로그인해 주세요.");
-    location.href = "/login";
-  } else {
-    $("msg").textContent = data.error;
-  }
-};
+document.getElementById("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const v = (id) => document.getElementById(id).value;
+  const btn = document.getElementById("btn"), msg = document.getElementById("msg");
+  msg.textContent = "";
+  if (v("password") !== v("password2")) { msg.textContent = "비밀번호가 서로 달라요"; return; }
+  btn.disabled = true; btn.textContent = "가입 중...";
+  try {
+    const body = { name: v("name").trim(), username: v("username").trim(), password: v("password") };
+    const r = await SH.api("/api/register", { json: body });
+    if (r.data && r.data.ok) {
+      const l = await SH.api("/api/login", { json: { username: body.username, password: body.password } });
+      if (l.data && l.data.ok) { location.href = "/"; return; }
+      location.href = "/login"; return;
+    }
+    msg.textContent = (r.data && r.data.error) || "가입에 실패했어요";
+  } catch { msg.textContent = "서버에 연결할 수 없어요"; }
+  btn.disabled = false; btn.textContent = "가입하고 시작하기";
+});
 </script>
-</body>
-</html>
+{% endblock %}
