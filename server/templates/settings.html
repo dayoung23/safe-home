@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Safe Home · 설정{% endblock %}
+{% block auth %}1{% endblock %}
+{% block screen %}
+<div class="page">
+  <div class="topbar"><h1>설정</h1></div>
+
+  <div class="card profile">
+    <div class="avatar" id="avatar">?</div>
+    <div style="flex:1;min-width:0"><b id="pName">불러오는 중</b><span id="pId"></span></div>
+    <span class="chip">관리자</span>
+  </div>
+
+  <div class="group-label">알림</div>
+  <div class="group">
+    <label class="row"><span class="row-ic red"><svg class="i"><use href="#i-bell"/></svg></span><span class="row-main">푸시 알림<small>위험·주의 알림을 바로 받아요</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+    <label class="row"><span class="row-ic"><svg class="i"><use href="#i-volume"/></svg></span><span class="row-main">알림 소리<small>위험 시 사이렌, 주의 시 알림음</small></span><span class="switch"><input type="checkbox" id="prefSound"><span></span></span></label>
+    <label class="row"><span class="row-ic"><svg class="i"><use href="#i-activity"/></svg></span><span class="row-main">진동<small>위험 알림 시 강한 진동</small></span><span class="switch"><input type="checkbox" id="prefVibe"><span></span></span></label>
+    <div class="row"><span class="row-ic gray"><svg class="i"><use href="#i-moon"/></svg></span><span class="row-main">방해 금지 시간<small>위험 알림은 항상 울려요</small></span><span class="row-end">23:00 ~ 07:00<svg class="i sm"><use href="#i-right"/></svg></span></div>
+    <button class="row" id="testAlarm"><span class="row-ic amber"><svg class="i"><use href="#i-play"/></svg></span><span class="row-main">알림 소리 미리 듣기</span><span class="row-end"><svg class="i sm"><use href="#i-right"/></svg></span></button>
+  </div>
+
+  <div class="group-label">감지 설정</div>
+  <div class="group">
+    <div class="row" style="flex-wrap:wrap"><span class="row-ic"><svg class="i"><use href="#i-activity"/></svg></span><span class="row-main">감지 민감도<small>높을수록 작은 소리에도 반응해요</small></span>
+      <div class="segment" style="width:100%;margin-top:10px" id="sens"><button>낮음</button><button class="on">보통</button><button>높음</button></div></div>
+    <label class="row"><span class="row-ic red"><svg class="i"><use href="#i-user"/></svg></span><span class="row-main">쓰러짐 감지<small>누운 자세가 이어지면 위험 알림</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+    <label class="row"><span class="row-ic red"><svg class="i"><use href="#i-alert"/></svg></span><span class="row-main">위협 자세 감지<small>양손을 머리 위로 든 자세</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+    <div class="row"><span class="row-ic amber"><svg class="i"><use href="#i-door"/></svg></span><span class="row-main">현관 구역<small>이 구역에 들어오면 도어락 기록을 확인해요</small></span><span class="row-end">화면 왼쪽 30%<svg class="i sm"><use href="#i-right"/></svg></span></div>
+  </div>
+
+  <div class="group-label">연결된 기기</div>
+  <div class="group">
+    <div class="row"><span class="row-ic"><svg class="i"><use href="#i-video"/></svg></span><span class="row-main">거실 홈캠<small id="dv-vision">YOLO 자세 분석</small></span><span class="row-end"><span class="status-dot on" id="dot-vision"></span>연결됨</span></div>
+    <div class="row"><span class="row-ic"><svg class="i"><use href="#i-mic"/></svg></span><span class="row-main">거실 마이크<small id="dv-sound">AST 위험 소리 분류</small></span><span class="row-end"><span class="status-dot on"></span>연결됨</span></div>
+    <a class="row" href="/keypad"><span class="row-ic"><svg class="i"><use href="#i-lock"/></svg></span><span class="row-main">스마트 도어락<small id="dv-keypad">타건 리듬 샘플 0개</small></span><span class="row-end">리듬 등록<svg class="i sm"><use href="#i-right"/></svg></span></a>
+  </div>
+
+  <div class="group-label">가족 · 보호자</div>
+  <div class="group">
+    <div class="row"><span class="avatar sm">엄</span><span class="row-main">엄마<small>010-****-1234 · 위험 알림 공유</small></span><span class="switch"><input type="checkbox" checked><span></span></span></div>
+    <div class="row"><span class="avatar sm">관</span><span class="row-main">관리사무소<small>02-***-5678 · 침입 알림 공유</small></span><span class="switch"><input type="checkbox"><span></span></span></div>
+    <div class="row" style="color:var(--primary);font-weight:700"><span class="row-ic"><svg class="i"><use href="#i-users"/></svg></span><span class="row-main">보호자 추가하기</span></div>
+  </div>
+
+  <div class="group-label">개인정보 · 보안</div>
+  <div class="group">
+    <div class="row"><span class="row-ic green"><svg class="i"><use href="#i-eye-off"/></svg></span><span class="row-main">영상은 저장하지 않아요<small>카메라 영상은 메모리에서 사람·자세만 분석하고 바로 버려요</small></span></div>
+    <div class="row"><span class="row-ic gray"><svg class="i"><use href="#i-clock"/></svg></span><span class="row-main">알림 기록 보관<small>판단 결과(문장)만 저장돼요</small></span><span class="row-end">30일<svg class="i sm"><use href="#i-right"/></svg></span></div>
+  </div>
+
+  <div class="group-label">앱 정보</div>
+  <div class="group">
+    <div class="row"><span class="row-ic gray"><svg class="i"><use href="#i-info"/></svg></span><span class="row-main">버전</span><span class="row-end">1.0.0 · 해커톤</span></div>
+    <button class="row" id="logout" style="color:var(--danger);font-weight:700"><span class="row-ic red"><svg class="i"><use href="#i-logout"/></svg></span><span class="row-main">로그아웃</span></button>
+  </div>
+  <p class="note">스위치 중 ‘알림 소리 · 진동’은 실제로 이 앱의 알림에 적용돼요. 나머지는 화면 구성용 목업이에요.</p>
+</div>
+{% endblock %}
+{% block nav %}{% with active='settings' %}{% include "_nav.html" %}{% endwith %}{% endblock %}
+{% block side %}{% include "_demo_panel.html" %}{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  SH.api("/api/me").then(({ data }) => {
+    if (!data || !data.name) return;
+    $("pName").textContent = `${data.name}님`;
+    $("pId").textContent = `@${data.username} · 우리 집 홈캠`;
+    $("avatar").textContent = data.name.slice(0, 1);
+    $("dv-keypad").textContent = `타건 리듬 샘플 ${data.sample_count || 0}개`;
+  });
+  for (const [id, key] of [["prefSound", "sound"], ["prefVibe", "vibe"]]) {
+    const el = $(id); el.checked = SH.pref.get(key, true);
+    el.addEventListener("change", () => { SH.pref.set(key, el.checked); SH.updateUnlock(); SH.toast(el.checked ? "켰어요" : "껐어요", 1200); });
+  }
+  $("testAlarm").addEventListener("click", () => { SH.playSound("주의"); SH.toast("주의 알림음이에요 (위험 시에는 사이렌)"); });
+  $("sens").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    document.querySelectorAll("#sens button").forEach((x) => x.classList.toggle("on", x === b));
+    SH.toast(`감지 민감도: ${b.textContent} (목업)`, 1400);
+  });
+  $("logout").addEventListener("click", async () => { await SH.api("/api/logout", { method: "POST" }); location.href = "/login"; });
+  SH.onStatus((st) => {
+    const live = st.camera && st.camera.live && st.camera.live.age < 6;
+    $("dot-vision").classList.toggle("on", !!live);
+    $("dv-vision").textContent = live ? "YOLO 자세 분석 · 실시간" : "YOLO 자세 분석 · 화면 신호 없음";
+  });
+})();
+</script>
+<script src="{{ url_for('static', filename='demo.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Safe Home · 도어락 리듬 등록{% endblock %}
+{% block auth %}1{% endblock %}
+{% block screen %}
+<div class="page">
+  <div class="topbar"><h1>도어락 리듬 등록</h1></div>
+  <div class="card">
+    <p style="margin:0 0 4px;font-weight:700">비밀번호를 누르는 ‘리듬’을 기억해요</p>
+    <p class="muted" style="margin:0;font-size:13px;line-height:1.5">같은 비밀번호라도 사람마다 버튼 사이 간격이 달라요. 가족의 리듬을 등록해 두면 귀가와 비밀번호 도용을 구분할 수 있어요.</p>
+  </div>
+
+  <div class="ring-wrap">
+    <div class="ring">
+      <svg width="190" height="190" viewBox="0 0 190 190">
+        <circle class="ring-bg" cx="95" cy="95" r="82" fill="none" stroke-width="14"/>
+        <circle class="ring-fg" id="ringFg" cx="95" cy="95" r="82" fill="none" stroke-width="14" stroke-linecap="round" stroke-dasharray="515.2" stroke-dashoffset="515.2"/>
+      </svg>
+      <div class="ring-center"><div><b id="count">0</b><span id="target">/ 5회</span></div></div>
+    </div>
+  </div>
+  <div class="reg-status" id="status">아래 버튼을 누르고 도어락 비밀번호를 입력하세요</div>
+
+  <div class="steps">
+    <div class="step">‘등록 시작’을 누르면 3분 동안 등록 모드가 돼요</div>
+    <div class="step">도어락에서 평소처럼 비밀번호를 끝까지 눌러 주세요</div>
+    <div class="step">삑 소리가 끝나고 3초 조용하면 1회로 저장돼요</div>
+    <div class="step">오류음이 나거나 간격을 못 읽은 입력은 횟수에서 빠져요</div>
+  </div>
+  <button class="btn primary block" id="btn"><svg class="i"><use href="#i-lock"/></svg>등록 시작</button>
+  <p class="note" id="sampleNote"></p>
+</div>
+{% endblock %}
+{% block nav %}{% with active='keypad' %}{% include "_nav.html" %}{% endwith %}{% endblock %}
+{% block side %}{% include "_demo_panel.html" %}{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const C = 515.2;
+  let timer = null;
+  function show(st) {
+    const target = st.target || 5, count = Math.min(st.count || 0, target);
+    $("count").textContent = count; $("target").textContent = `/ ${target}회`;
+    $("ringFg").style.strokeDashoffset = C * (1 - count / target);
+    const s = $("status");
+    if (st.done) { s.textContent = "등록 완료! 이제 이 리듬으로 귀가를 알아봐요"; s.className = "reg-status ok"; $("btn").textContent = "다시 등록하기"; $("btn").disabled = false; clearInterval(timer); loadMe(); }
+    else { s.textContent = `도어락 비밀번호를 입력해 주세요 (${count}/${target})`; s.className = "reg-status"; }
+  }
+  async function poll() {
+    const { data } = await SH.api("/api/keypad/register/status");
+    if (data && data.active) show(data);
+  }
+  function loadMe() {
+    SH.api("/api/me").then(({ data }) => {
+      if (data) $("sampleNote").textContent = `${data.name}님의 저장된 리듬 샘플: ${data.sample_count || 0}개 · 샘플 3개 이상부터 비교에 사용돼요`;
+    });
+  }
+  $("btn").addEventListener("click", async () => {
+    $("btn").disabled = true;
+    const { data } = await SH.api("/api/keypad/register", { json: {} });
+    if (!data || !data.ok) { $("status").textContent = (data && data.error) || "등록을 시작하지 못했어요"; $("btn").disabled = false; return; }
+    show(data.status || { count: 0, target: 5 });
+    $("btn").textContent = "입력 기다리는 중...";
+    clearInterval(timer); timer = setInterval(poll, 1000);
+  });
+  poll(); loadMe();
+})();
+</script>
+<script src="{{ url_for('static', filename='demo.js') }}"></script>
+{% endblock %}

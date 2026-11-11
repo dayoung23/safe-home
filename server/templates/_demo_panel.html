@@ -1,0 +1,29 @@
+<aside class="side right">
+  <div class="panel">
+    <h3><svg class="i"><use href="#i-play"/></svg>시연 시나리오<span class="panel-tag">DEMO</span></h3>
+    <p class="desc">실제 센서와 같은 형식의 이벤트를 판단 엔진에 넣어요. 판정과 알림은 실제 로직 그대로 동작합니다.</p>
+    <div class="scn" id="scenarios">
+      <button data-scn="homecoming"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>가족 귀가</b><small>정상 도어락 리듬 → 현관 진입</small></span><span class="expect 안전">안전</span></button>
+      <button data-scn="stolen_pin"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>비밀번호 도용 침입</b><small>리듬 불일치 → 현관 진입</small></span><span class="expect 위험">위험</span></button>
+      <button data-scn="intrusion"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>인증 없는 현관 진입</b><small>8초간 도어락 기록 대기</small></span><span class="expect 주의">주의</span></button>
+      <button data-scn="scream"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>비명 + 사람 확인</b><small>소리 → 카메라 교차 확인</small></span><span class="expect 위험">위험</span></button>
+      <button data-scn="threat"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>협박 상황</b><small>문 쾅 → 양손 든 자세</small></span><span class="expect 위험">위험</span></button>
+      <button data-scn="fall"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>쓰러짐</b><small>누운 자세 연속 감지</small></span><span class="expect 위험">위험</span></button>
+      <button data-scn="noise"><span class="play"><svg class="i"><use href="#i-play"/></svg></span><span><b>생활 소음 (오탐 방지)</b><small>유리 소리 → 영상 이상 없음</small></span><span class="expect 주의">주의</span></button>
+    </div>
+    <details class="ev-more"><summary>개별 이벤트 직접 넣기</summary>
+    <div class="ev-grid" id="events">
+      <button data-ev="scream">비명</button><button data-ev="glass">유리 깨짐</button><button data-ev="slam">문 쾅</button>
+      <button data-ev="keypad_ok">정상 도어락</button><button data-ev="keypad_bad">리듬 불일치</button><button data-ev="keypad_fail">오류 반복</button>
+      <button data-ev="person">사람 등장</button><button data-ev="entry">현관 진입</button><button data-ev="threat">손 들기</button>
+      <button data-ev="fall">쓰러짐</button><button data-ev="none">사람 없음</button>
+    </div></details>
+    <button class="clear-btn" id="clearBtn"><svg class="i sm"><use href="#i-trash"/></svg>알림 · 사건 기록 초기화</button>
+  </div>
+  <div class="panel">
+    <h3><svg class="i"><use href="#i-activity"/></svg>실시간 판단 로그</h3>
+    <p class="desc">센서 이벤트가 judge에 들어와서 어떻게 처리됐는지 보여줘요.</p>
+    <div class="incident" id="incident"><span id="incidentText">사건 창</span><span class="bar"><i id="incidentBar"></i></span></div>
+    <div class="log" id="log"><div class="log-empty">아직 들어온 이벤트가 없어요</div></div>
+  </div>
+</aside>

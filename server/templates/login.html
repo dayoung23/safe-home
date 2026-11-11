@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Safe Home · 로그인{% endblock %}
+{% block screen %}
+<div class="page auth">
+  <div class="brand">
+    <div class="brand-logo"><svg class="i"><use href="#i-shield-check"/></svg></div>
+    <h1>Safe Home</h1>
+    <p>소리 · 영상 · 도어락을 함께 보고<br>우리 집 위험을 먼저 알려드려요</p>
+  </div>
+  <div class="feature-row">
+    <span class="chip"><svg class="i"><use href="#i-mic"/></svg>위험 소리</span>
+    <span class="chip"><svg class="i"><use href="#i-video"/></svg>AI 영상</span>
+    <span class="chip"><svg class="i"><use href="#i-lock"/></svg>도어락 리듬</span>
+  </div>
+  <form id="form" autocomplete="on">
+    <div class="field"><label for="username">아이디</label><input id="username" autocomplete="username" placeholder="아이디를 입력하세요"></div>
+    <div class="field"><label for="password">비밀번호</label><input id="password" type="password" autocomplete="current-password" placeholder="비밀번호를 입력하세요"></div>
+    <div class="form-msg" id="msg"></div>
+    <button class="btn primary block" id="btn" type="submit">로그인</button>
+  </form>
+  <div class="auth-foot">처음이신가요? <a href="/register">회원가입</a></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("btn"), msg = document.getElementById("msg");
+  msg.textContent = ""; btn.disabled = true; btn.textContent = "로그인 중...";
+  try {
+    const { data } = await SH.api("/api/login", { json: {
+      username: document.getElementById("username").value.trim(),
+      password: document.getElementById("password").value,
+    }});
+    if (data && data.ok) { location.href = "/"; return; }
+    msg.textContent = (data && data.error) || "로그인에 실패했어요";
+  } catch { msg.textContent = "서버에 연결할 수 없어요"; }
+  btn.disabled = false; btn.textContent = "로그인";
+});
+</script>
+{% endblock %}

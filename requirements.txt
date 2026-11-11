@@ -1,0 +1,14 @@
+flask
+pymongo
+python-dotenv
+requests
+numpy
+scipy
+opencv-python
+transformers
+torch
+sounddevice
+ultralytics
+# Qwen 백업(VISION_MODE=qwen|local)할 때만 필요
+# accelerate
+# qwen-vl-utils[decord]
