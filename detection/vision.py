@@ -4,7 +4,8 @@ detection/vision.py — 홈캠 영상 실시간 서버 (트리거 → 클립 관
   평상시 : 프레임만 받고 MotionTrigger(160x90 흑백 차분)만 돌림 → 추론 없음, CPU 거의 안 씀
   트리거 : ① 움직임 감지  ② judge 의 확인 요청(위험 소리·키패드 이상 → request_check)
            → 트리거 전 CLIP_SEC + 이후 POST_SEC 를 클립으로 묶어 분석 스레드에 넘김
-  분석   : clip_analyzer.analyze_clip (stub = 미리 추론한 fixture / local = Qwen2.5-VL 실추론)
+  분석   : clip_analyzer (yolo = YOLO26 pose 실추론, 기본 / stub = 미리 추론한 fixture, 비상용
+           / local = Qwen2.5-VL 상세 설명)
            분석은 별도 스레드라 추론이 오래 걸려도 프레임 루프는 멈추지 않음.
            분석 중에 들어온 트리거는 건너뜀 (GPU 1장 기준).
   전달   : 관측 이벤트 dict → notify() → vision_events.jsonl + risk.judge.on_event (+옵션 HTTP)
@@ -14,6 +15,7 @@ detection/vision.py — 홈캠 영상 실시간 서버 (트리거 → 클립 관
 실행
   python main.py                                   # 서버 + 오디오 + 영상 같이 (권장)
   python -m detection.vision --source 0 --preview  # 영상만 단독 (t = 수동 트리거, q = 종료)
+  python -m detection.vision --source http://<파이IP>:8000/stream.mjpg --preview   # 라즈베리파이 카메라
   python -m detection.vision --source demo.mp4 --mode local
 """
 from __future__ import annotations
@@ -36,14 +38,14 @@ import numpy as np
 
 try:
     from detection.motion_trigger import MotionTrigger, TriggerConfig
-    from detection.clip_analyzer import analyze_clip, list_fixtures
+    from detection.clip_analyzer import analyze_clip, analyze_frames, list_fixtures, load_yolo
 except ImportError:   # detection 폴더 안에서 단독 실행할 때
     from motion_trigger import MotionTrigger, TriggerConfig
-    from clip_analyzer import analyze_clip, list_fixtures
+    from clip_analyzer import analyze_clip, analyze_frames, list_fixtures, load_yolo
 
 # ───────────────────────── 설정 ─────────────────────────
 CLIP_SEC = 4.0           # 트리거 이전 구간 (링버퍼)
-POST_SEC = 2.0           # 트리거 이후 더 모을 구간 (local 모드만)
+POST_SEC = 2.0           # 트리거 이후 더 모을 구간 (yolo / local)
 PROCESS_EVERY_N = 2      # 모션 판정은 N프레임마다
 COOLDOWN_SEC = 8.0       # 모션 트리거 쿨다운
 STUB_DELAY_SEC = 0.8     # stub 모드 시연 연출용 대기 ("분석 중" 표시)
@@ -171,6 +173,8 @@ def _analysis_worker(device_id: str, mode: str) -> None:
                     continue
                 time.sleep(STUB_DELAY_SEC)
                 obs = analyze_clip(None, mode="stub", fixture=fixture)
+            elif mode == "yolo":
+                obs = analyze_frames(job["frames"])     # 메모리 프레임만 사용, 파일 저장 없음
             else:
                 clip = save_clip(job["frames"], job["fps"])
                 obs = analyze_clip(str(clip), mode="local")
@@ -203,13 +207,15 @@ def _open_capture(source: str):
     import cv2
 
     cap = cv2.VideoCapture(int(source)) if str(source).isdigit() else cv2.VideoCapture(source)
+    if not str(source).isdigit():
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 네트워크 스트림 지연 줄이기
     if not cap.isOpened():
         raise RuntimeError(f"영상 소스를 열 수 없습니다: {source}")
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     return cap, (fps if 1e-3 < fps <= 120 else 15.0)
 
 
-def run(source: str = "0", device_id: str = "homecam-1", mode: str = "stub",
+def run(source: str = "0", device_id: str = "homecam-1", mode: str = "yolo",
         preview: bool = False, loop_file: bool = True) -> None:
     """main.py 가 스레드로 실행하는 함수. (preview 창은 단독 실행 때만)"""
     import cv2
@@ -224,6 +230,8 @@ def run(source: str = "0", device_id: str = "homecam-1", mode: str = "stub",
     ring: deque[np.ndarray] = deque(maxlen=max(int((CLIP_SEC + POST_SEC) * fps), 1))
     trigger = MotionTrigger(TriggerConfig(min_interval_sec=COOLDOWN_SEC))
     threading.Thread(target=_analysis_worker, args=(device_id, mode), daemon=True).start()
+    if mode == "yolo":   # 첫 트리거 때 로딩 지연이 없도록 미리 불러 둠
+        threading.Thread(target=load_yolo, daemon=True).start()
 
     print(f"\n영상 감지 시작 (source={source}, fps≈{fps:.0f}, mode={mode}, "
           f"fixtures={len(list_fixtures())}개)")
@@ -296,7 +304,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="영상 트리거 → 클립 관측 (단독 실행)")
     ap.add_argument("--source", default="0", help="웹캠 번호 | mp4 경로 | rtsp://...")
     ap.add_argument("--device-id", default="homecam-1")
-    ap.add_argument("--mode", choices=("stub", "local"), default=os.getenv("VISION_MODE", "stub"))
+    ap.add_argument("--mode", choices=("yolo", "stub", "local"), default=os.getenv("VISION_MODE", "yolo"))
     ap.add_argument("--preview", action="store_true")
     a = ap.parse_args()
     run(a.source, a.device_id, a.mode, preview=a.preview)

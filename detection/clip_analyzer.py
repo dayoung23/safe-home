@@ -5,8 +5,9 @@ vision.py 가 모션/소리 트리거로 잘라 낸 짧은 클립 1개를 받아
 "무엇이 보이는지"만 관측해 dict 로 돌려준다. 위험 등급은 정하지 않는다 (judge 담당).
 
 모드
-  stub  : detection/fixtures/*.json 에 미리 추론해 둔 관측 결과를 반환 (시연 기본, GPU·지연 없음)
-  local : Qwen2.5-VL 로 클립을 실제 추론 (GPU 권장, 클립당 수~수십 초)
+  yolo  : YOLO26 pose(nano) 로 프레임 실추론 → 사람 수·자세·쓰러짐 (CPU 실시간, 시연 기본)
+  stub  : detection/fixtures/*.json 에 미리 추론해 둔 관측 결과를 반환 (비상용)
+  local : Qwen2.5-VL 로 클립을 실제 추론 → 자연어 상세 설명 (GPU 권장, 클립당 수~수십 초)
 
 미리 추론 결과(fixture) 만들기 — 시연 클립을 local 로 한 번 돌려 저장:
   python -m detection.clip_analyzer clips/demo_intruder.mp4 --save detection/fixtures/02_intruder.json
@@ -162,6 +163,104 @@ def _infer_local(clip_path: str) -> dict[str, Any]:
     trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, out_ids)]
     raw = processor.batch_decode(trimmed, skip_special_tokens=True)[0]
     return _parse_json(raw)
+
+
+# ───────────────────────── yolo: YOLO26 pose 실추론 ─────────────────────────
+YOLO_MODEL = os.getenv("YOLO_MODEL", "yolo26n-pose.pt")   # 처음 실행 때 자동 다운로드 (~7MB)
+YOLO_FALLBACK = "yolo11n-pose.pt"                         # ultralytics 가 구버전이면 이걸로
+YOLO_CONF = float(os.getenv("YOLO_CONF", "0.45"))
+YOLO_SAMPLE_FRAMES = 12          # 클립에서 균등하게 뽑아 추론할 프레임 수
+FALL_RATIO = 0.6                 # 후반부 프레임 중 이 비율 이상 누운 자세면 쓰러짐
+_yolo = None
+_yolo_lock = threading.Lock()
+# COCO 17 키포인트: 5,6 어깨 / 11,12 엉덩이
+L_SH, R_SH, L_HIP, R_HIP = 5, 6, 11, 12
+
+
+def load_yolo():
+    """YOLO pose 모델 로드 (한 번만). vision.run 이 시작할 때 미리 불러 둠."""
+    global _yolo
+    with _load_lock:
+        if _yolo is None:
+            from ultralytics import YOLO
+            try:
+                _yolo = YOLO(YOLO_MODEL)
+            except Exception as e:
+                print(f"[clip_analyzer] {YOLO_MODEL} 로드 실패({e}) → {YOLO_FALLBACK}")
+                _yolo = YOLO(YOLO_FALLBACK)
+            print(f"[clip_analyzer] YOLO 준비 완료 ({_yolo.ckpt_path if hasattr(_yolo, 'ckpt_path') else YOLO_MODEL})")
+    return _yolo
+
+
+def _is_lying(box, kp_xy, kp_conf, frame_wh) -> bool | None:
+    """누운 자세 판정. True/False, 판단 불가면 None.
+    1순위: 몸통(어깨 중점 → 엉덩이 중점)이 수평에 가까우면 누움 (보이는 쪽 어깨·엉덩이만 사용)
+    2순위: 엉덩이가 안 보이면 박스 가로세로비 — 단, 화면 끝에 잘린 사람(근접 상반신)은 판단 안 함"""
+    if kp_xy is not None and kp_conf is not None:
+        sh = [kp_xy[i] for i in (L_SH, R_SH) if kp_conf[i] > 0.3]
+        hip = [kp_xy[i] for i in (L_HIP, R_HIP) if kp_conf[i] > 0.3]
+        if sh and hip:
+            s_c, h_c = sum(sh) / len(sh), sum(hip) / len(hip)
+            dx, dy = abs(float(h_c[0] - s_c[0])), abs(float(h_c[1] - s_c[1]))
+            return dx > dy          # 몸통이 45도보다 눕혀짐
+    x1, y1, x2, y2 = [float(v) for v in box]
+    w, h = frame_wh
+    if x1 < 5 or y1 < 5 or x2 > w - 5 or y2 > h - 5:
+        return None                 # 잘린 사람 → 판단 불가
+    return (x2 - x1) > 1.3 * (y2 - y1)
+
+
+def _yolo_frame(frame) -> list[dict[str, Any]]:
+    """프레임 1장 → [{"conf", "lying"}] (사람만)"""
+    model = load_yolo()
+    with _infer_lock:
+        r = model(frame, conf=YOLO_CONF, classes=[0], verbose=False)[0]
+    people = []
+    if r.boxes is None or len(r.boxes) == 0:
+        return people
+    kxy = r.keypoints.xy.cpu().numpy() if r.keypoints is not None else None
+    kcf = r.keypoints.conf.cpu().numpy() if (r.keypoints is not None and r.keypoints.conf is not None) else None
+    for i, box in enumerate(r.boxes.xyxy.cpu().numpy()):
+        people.append({
+            "conf": float(r.boxes.conf[i]),
+            "lying": _is_lying(box, kxy[i] if kxy is not None else None,
+                               kcf[i] if kcf is not None else None, (frame.shape[1], frame.shape[0])),
+        })
+    return people
+
+
+def analyze_frames(frames: list) -> dict[str, Any]:
+    """트리거 전후 프레임들 → 관측 결과 (type: person | fall | motion)"""
+    if not frames:
+        return normalize({"type": "none", "message": "프레임이 없어요"})
+    step = max(len(frames) // YOLO_SAMPLE_FRAMES, 1)
+    sampled = frames[::step][:YOLO_SAMPLE_FRAMES]
+    per_frame = [_yolo_frame(f) for f in sampled]
+
+    with_people = [p for p in per_frame if p]
+    if not with_people:
+        return normalize({"type": "motion", "confidence": 0.5,
+                          "message": "움직임은 있었지만 사람은 보이지 않아요"})
+
+    max_n = max(len(p) for p in with_people)
+    mean_conf = sum(x["conf"] for p in with_people for x in p) / sum(len(p) for p in with_people)
+    late = with_people[len(with_people) // 2:]                  # 트리거 이후 쪽 프레임
+    lying_ratio = sum(any(x["lying"] is True for x in p) for p in late) / len(late)
+    last = with_people[-1]
+    desc = {True: "누워 있음", False: "서 있거나 앉아 있음", None: "자세 판단 불가 (화면에 일부만 보임)"}
+    persons = [{"gender": "불명", "desc": desc[x["lying"]]} for x in last]
+
+    if lying_ratio >= FALL_RATIO and len(late) >= 2:
+        return normalize({
+            "type": "fall", "persons": persons, "confidence": round(mean_conf * lying_ratio, 3),
+            "behavior": f"누운 자세가 계속됨 ({lying_ratio:.0%})",
+            "message": f"사람이 바닥에 누운 채 움직이지 않아요 (사람 {max_n}명)",
+        })
+    return normalize({
+        "type": "person", "persons": persons, "confidence": round(mean_conf, 3),
+        "behavior": f"사람 {max_n}명 확인",
+        "message": f"사람 {max_n}명이 보여요",
+    })
 
 
 # ───────────────────────── 진입점 ─────────────────────────

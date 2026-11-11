@@ -10,8 +10,8 @@ main.py — Flask 웹서버 + 감지 스레드(오디오, 영상)를 한 프로�
 환경변수 (.env 에 넣어도 됨)
   DEVICE_ID=homecam-1     소리·영상이 같은 집(device)으로 묶이도록 같은 값 사용
   AUDIO_SOURCE=mic        mic | 파일 경로 | rtsp://...
-  VISION_SOURCE=0         웹캠 번호 | 파일 경로 | rtsp://...
-  VISION_MODE=stub        stub(미리 추론한 fixture, 시연용) | local(Qwen2.5-VL 실추론)
+  VISION_SOURCE=0         웹캠 번호 | http://<파이IP>:8000/stream.mjpg (라즈베리파이) | rtsp://...
+  VISION_MODE=yolo        yolo(YOLO26 pose 실추론) | stub(미리 추론한 fixture, 비상용) | local(Qwen2.5-VL)
 """
 import os
 import threading
@@ -22,7 +22,7 @@ from detection import realtime, vision
 DEVICE_ID = os.getenv("DEVICE_ID", "homecam-1")
 AUDIO_SOURCE = os.getenv("AUDIO_SOURCE", "mic")
 VISION_SOURCE = os.getenv("VISION_SOURCE", "0")
-VISION_MODE = os.getenv("VISION_MODE", "stub")
+VISION_MODE = os.getenv("VISION_MODE", "yolo")
 
 
 def start(name, target, **kwargs):
