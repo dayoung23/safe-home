@@ -1,22 +1,22 @@
 """
 main.py — Flask 웹서버 + 감지 스레드(오디오, 영상)를 한 프로그램으로 실행
 
-  realtime.run  : 마이크/RTSP 오디오 → 위험 소리·도어락 키패드 → judge
-  vision.run    : 웹캠/RTSP 영상 → 모션 트리거 → 클립 관측 → judge
-  judge         : 소리·영상·키패드를 시간으로 묶어 등급 판정 → MongoDB alerts
-  server.app    : 로그인·대시보드, /api/alerts 로 알림 표시
+  [audio 스레드]  realtime.run : 마이크 → 위험 소리(AST) · 도어락 키패드 → judge
+  [vision 스레드] vision.run   : 노트북 캠 → YOLO 상시 탐지 → 상태 트리거 → 관측 → judge
+  [judge]         사건 창 5초로 소리·영상·키패드를 묶어 등급 판정 → MongoDB alerts
+  [메인 스레드]   Flask :5000  : 로그인·대시보드, /api/alerts (DB 읽기만)
 
 실행 (프로젝트 루트 safe-home/ 에서):  python main.py
-환경변수 (.env 에 넣어도 됨)
-  DEVICE_ID=homecam-1     소리·영상이 같은 집(device)으로 묶이도록 같은 값 사용
-  AUDIO_SOURCE=mic        mic | 파일 경로 | rtsp://...
-  VISION_SOURCE=0         웹캠 번호 | http://<파이IP>:8000/stream.mjpg (라즈베리파이) | rtsp://...
-  VISION_MODE=yolo        yolo(YOLO26 pose 실추론) | stub(미리 추론한 fixture, 비상용) | local(Qwen2.5-VL)
+환경변수 (.env)
+  DEVICE_ID=homecam-1   소리·영상이 같은 집으로 묶이도록 같은 값
+  AUDIO_SOURCE=mic      mic | 파일 경로 | rtsp://...
+  VISION_SOURCE=0       노트북 캠 번호 | 파일 경로 | rtsp:// | http://.../stream.mjpg
+  VISION_MODE=yolo      yolo (기본) | stub | local(qwen)
 """
 import os
 import threading
 
-from server.app import app            # .env 로드 + DB 연결 확인 (실패하면 여기서 바로 알려 줌)
+from server.app import app            # .env 로드 + DB 연결 확인
 from detection import realtime, vision
 
 DEVICE_ID = os.getenv("DEVICE_ID", "homecam-1")

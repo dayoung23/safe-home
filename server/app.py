@@ -32,7 +32,7 @@ def not_found(_):
         return jsonify({"ok": False, "error": "없는 API입니다"}), 404
     return "페이지를 찾을 수 없어요", 404
 
-#감지 스레드 없이 그냥 킨거
+
 if __name__ == "__main__":
     # 단독 테스트용. main.py에서는 app.run(port=5000, use_reloader=False)로 실행할 것
     app.run(port=5000, debug=True, use_reloader=False)

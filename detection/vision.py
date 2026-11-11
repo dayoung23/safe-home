@@ -1,22 +1,17 @@
 """
-detection/vision.py — 홈캠 영상 실시간 서버 (트리거 → 클립 관측 → judge)
+detection/vision.py — 홈캠 영상 실시간 (YOLO 트리거 + 관측 → judge)
 
-  평상시 : 프레임만 받고 MotionTrigger(160x90 흑백 차분)만 돌림 → 추론 없음, CPU 거의 안 씀
-  트리거 : ① 움직임 감지  ② judge 의 확인 요청(위험 소리·키패드 이상 → request_check)
-           → 트리거 전 CLIP_SEC + 이후 POST_SEC 를 클립으로 묶어 분석 스레드에 넘김
-  분석   : clip_analyzer (yolo = YOLO26 pose 실추론, 기본 / stub = 미리 추론한 fixture, 비상용
-           / local = Qwen2.5-VL 상세 설명)
-           분석은 별도 스레드라 추론이 오래 걸려도 프레임 루프는 멈추지 않음.
-           분석 중에 들어온 트리거는 건너뜀 (GPU 1장 기준).
-  전달   : 관측 이벤트 dict → notify() → vision_events.jsonl + risk.judge.on_event (+옵션 HTTP)
-
-위험 등급은 정하지 않는다 (judge 담당). 클립은 local 추론에만 임시 파일로 쓰고 바로 지운다.
+  평상시 : 프레임 → YOLOv8n (person) → 상태 게이트. 의미 있는 변화만 이벤트화.
+  관측   : mode=yolo → 보수적 매핑 (person / fall / suspicious / none)
+           mode=qwen|local → 클립 + backup Qwen
+           mode=stub → backup fixtures
+  전달   : vision_events.jsonl + risk.judge.on_event
+  위험 등급은 정하지 않는다 (judge 담당).
 
 실행
-  python main.py                                   # 서버 + 오디오 + 영상 같이 (권장)
-  python -m detection.vision --source 0 --preview  # 영상만 단독 (t = 수동 트리거, q = 종료)
-  python -m detection.vision --source http://<파이IP>:8000/stream.mjpg --preview   # 라즈베리파이 카메라
-  python -m detection.vision --source demo.mp4 --mode local
+  python main.py
+  python -m detection.vision --source 0 --preview
+  python -m detection.vision --source demo.mp4 --mode yolo
 """
 from __future__ import annotations
 
@@ -37,21 +32,24 @@ from typing import Any
 import numpy as np
 
 try:
-    from detection.motion_trigger import MotionTrigger, TriggerConfig
-    from detection.clip_analyzer import analyze_clip, analyze_frames, list_fixtures, load_yolo
-except ImportError:   # detection 폴더 안에서 단독 실행할 때
-    from motion_trigger import MotionTrigger, TriggerConfig
-    from clip_analyzer import analyze_clip, analyze_frames, list_fixtures, load_yolo
+    from detection.yolo_detector import FrameDetections, YoloDetector
+    from detection.yolo_trigger import TriggerConfig, YoloTrigger
+    from detection.yolo_obs import map_observation
+except ImportError:
+    from yolo_detector import FrameDetections, YoloDetector
+    from yolo_trigger import TriggerConfig, YoloTrigger
+    from yolo_obs import map_observation
 
 # ───────────────────────── 설정 ─────────────────────────
-CLIP_SEC = 4.0           # 트리거 이전 구간 (링버퍼)
-POST_SEC = 2.0           # 트리거 이후 더 모을 구간 (yolo / local)
-PROCESS_EVERY_N = 2      # 모션 판정은 N프레임마다
-COOLDOWN_SEC = 8.0       # 모션 트리거 쿨다운
-STUB_DELAY_SEC = 0.8     # stub 모드 시연 연출용 대기 ("분석 중" 표시)
+CLIP_SEC = float(os.getenv("VISION_CLIP_SEC", "4.0"))
+POST_SEC = float(os.getenv("VISION_POST_SEC", "2.0"))
+PROCESS_EVERY_N = int(os.getenv("YOLO_EVERY_N", "2"))
+COOLDOWN_SEC = float(os.getenv("YOLO_COOLDOWN_SEC", "8.0"))
+STUB_DELAY_SEC = float(os.getenv("VISION_STUB_DELAY", "0.4"))
 SERVER_URL = os.getenv("VISION_SERVER_URL", "")
-FIXED_FIXTURE = os.getenv("VISION_FIXTURE", "")   # 비우면 fixtures/*.json 을 파일명 순서대로 순환
+FIXED_FIXTURE = os.getenv("VISION_FIXTURE", "")
 EVENT_LOG = Path(__file__).resolve().parent / "vision_events.jsonl"
+DEFAULT_MODE = os.getenv("VISION_MODE", "yolo")
 
 stop = threading.Event()
 _jobs: "queue.Queue[dict]" = queue.Queue(maxsize=1)
@@ -64,9 +62,8 @@ def now_iso() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
 
 
-# ───────────────────────── judge → vision 확인 요청 ─────────────────────────
 def request_check(reason: str = "external") -> None:
-    """judge 가 위험 소리·키패드 이상을 받았을 때 호출 → 다음 프레임에서 강제 트리거."""
+    """judge → 다음 주기 강제 관측."""
     global _check_reason
     with _check_lock:
         _check_reason = reason
@@ -79,7 +76,6 @@ def _pop_check() -> str | None:
     return r
 
 
-# ───────────────────────── 클립 / fixture ─────────────────────────
 def save_clip(frames: list[np.ndarray], fps: float) -> Path:
     import cv2
 
@@ -102,6 +98,10 @@ class FixtureCycle:
         if FIXED_FIXTURE:
             return Path(FIXED_FIXTURE)
         if self._it is None:
+            try:
+                from detection.qwen_backup import list_fixtures
+            except ImportError:
+                from qwen_backup import list_fixtures
             files = list_fixtures()
             if not files:
                 return None
@@ -112,10 +112,14 @@ class FixtureCycle:
 _fixtures = FixtureCycle()
 
 
-# ───────────────────────── 이벤트 · 전달 ─────────────────────────
-def make_event(device_id: str, obs: dict[str, Any], job: dict, mode: str,
-               fixture: str | None, infer_sec: float) -> dict[str, Any]:
-    """공통 필드(device_id, event_id, source, type, message, confidence, timestamp) + 영상 전용 필드."""
+def make_event(
+    device_id: str,
+    obs: dict[str, Any],
+    job: dict,
+    mode: str,
+    fixture: str | None,
+    infer_sec: float,
+) -> dict[str, Any]:
     return {
         "device_id": device_id,
         "event_id": f"vision-{uuid.uuid4().hex[:10]}",
@@ -124,16 +128,18 @@ def make_event(device_id: str, obs: dict[str, Any], job: dict, mode: str,
         "message": obs["message"],
         "confidence": obs["confidence"],
         "timestamp": now_iso(),
-        "scene": obs["scene"],
-        "persons": obs["persons"],
-        "behavior": obs["behavior"],
+        "scene": obs.get("scene") or "",
+        "persons": obs.get("persons") or [],
+        "behavior": obs.get("behavior") or "",
         "detail": {
-            "trigger": job["reason"],          # motion | sound | keypad | manual
-            "trigger_time": job["timestamp"],
-            "motion_score": round(job["score"], 4),
+            "trigger": job.get("reason", ""),
+            "trigger_time": job.get("timestamp", now_iso()),
+            "motion_score": round(float(job.get("score") or 0.0), 4),
+            "person_count": int(job.get("person_count") or 0),
             "analyze_mode": mode,
             "fixture": fixture,
-            "infer_sec": round(infer_sec, 2),
+            "infer_sec": round(infer_sec, 3),
+            "yolo": job.get("yolo"),
         },
     }
 
@@ -141,11 +147,12 @@ def make_event(device_id: str, obs: dict[str, Any], job: dict, mode: str,
 def notify(event: dict[str, Any]) -> None:
     with open(EVENT_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    # judge 는 별도 스레드로 호출 → DB 저장이 느려도 YOLO 프레임 루프는 안 멈춤 (realtime.py 와 동일)
     try:
         from risk import judge
-        judge.on_event(event)          # 이미 분석 스레드 안이라 프레임 루프는 안 막힘
+        threading.Thread(target=judge.on_event, args=(event,), daemon=True).start()
     except Exception as e:
-        print(f"[vision] judge.on_event 실패: {e}")
+        print(f"[vision] judge import 실패: {e}")
     if SERVER_URL:
         try:
             import requests
@@ -154,8 +161,28 @@ def notify(event: dict[str, Any]) -> None:
             print(f"[vision] 서버 전송 실패: {e}")
 
 
-# ───────────────────────── 분석 스레드 ─────────────────────────
-def _analysis_worker(device_id: str, mode: str) -> None:
+def _emit_obs(
+    device_id: str,
+    obs: dict[str, Any],
+    job: dict,
+    mode: str,
+    fixture: str | None,
+    infer_sec: float,
+) -> None:
+    event = make_event(device_id, obs, job, mode, fixture, infer_sec)
+    print(
+        f"  ✓ 영상 관측 ({mode}, {event['detail']['infer_sec']}s) "
+        f"type={event['type']} msg={event['message'][:60]}"
+    )
+    notify(event)
+
+
+def _backup_worker(device_id: str, mode: str) -> None:
+    try:
+        from detection.qwen_backup import analyze_clip
+    except ImportError:
+        from qwen_backup import analyze_clip
+
     while not stop.is_set():
         try:
             job = _jobs.get(timeout=0.5)
@@ -169,74 +196,145 @@ def _analysis_worker(device_id: str, mode: str) -> None:
             if mode == "stub":
                 fixture = _fixtures.next()
                 if fixture is None:
-                    print("[vision] fixtures/*.json 이 없어 관측 생략")
+                    print("[vision] backup fixtures 없음 → 관측 생략")
                     continue
                 time.sleep(STUB_DELAY_SEC)
                 obs = analyze_clip(None, mode="stub", fixture=fixture)
-            elif mode == "yolo":
-                obs = analyze_frames(job["frames"])     # 메모리 프레임만 사용, 파일 저장 없음
             else:
-                clip = save_clip(job["frames"], job["fps"])
+                frames = job.get("frames") or []
+                if not frames:
+                    print("[vision] Qwen 백업인데 프레임 없음 → 생략")
+                    continue
+                clip = save_clip(frames, job["fps"])
                 obs = analyze_clip(str(clip), mode="local")
-            event = make_event(device_id, obs, job, mode, str(fixture) if fixture else None, time.time() - t0)
-            print(f"  ✓ 영상 관측 ({mode}, {event['detail']['infer_sec']}s) "
-                  f"type={event['type']} msg={event['message'][:50]}")
-            notify(event)
+            _emit_obs(
+                device_id, obs, job, mode,
+                str(fixture) if fixture else None, time.time() - t0,
+            )
         except Exception as e:
-            print(f"[vision] 관측 실패: {e}")
+            print(f"[vision] 백업 관측 실패: {e}")
         finally:
             if clip is not None:
-                clip.unlink(missing_ok=True)   # 영상은 판단에만 쓰고 저장하지 않음
+                clip.unlink(missing_ok=True)
             _busy.clear()
 
 
-def _submit(job: dict) -> bool:
+def _submit_backup(job: dict) -> bool:
     if _busy.is_set():
-        print("  ↷ 이전 클립 분석 중 → 이번 트리거 생략")
+        print("  ↷ 이전 백업 분석 중 → 이번 트리거 생략")
         return False
     try:
         _jobs.put_nowait(job)
         return True
     except queue.Full:
-        print("  ↷ 분석 대기열 가득 → 이번 트리거 생략")
+        print("  ↷ 백업 대기열 가득 → 이번 트리거 생략")
         return False
 
 
-# ───────────────────────── 메인 루프 ─────────────────────────
 def _open_capture(source: str):
     import cv2
 
     cap = cv2.VideoCapture(int(source)) if str(source).isdigit() else cv2.VideoCapture(source)
-    if not str(source).isdigit():
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 네트워크 스트림 지연 줄이기
     if not cap.isOpened():
         raise RuntimeError(f"영상 소스를 열 수 없습니다: {source}")
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     return cap, (fps if 1e-3 < fps <= 120 else 15.0)
 
 
-def run(source: str = "0", device_id: str = "homecam-1", mode: str = "yolo",
-        preview: bool = False, loop_file: bool = True) -> None:
-    """main.py 가 스레드로 실행하는 함수. (preview 창은 단독 실행 때만)"""
+def _normalize_mode(mode: str) -> str:
+    m = (mode or "yolo").strip().lower()
+    if m in ("qwen", "vl"):
+        return "local"
+    if m in ("yolo", "local", "stub"):
+        return m
+    print(f"[vision] unknown mode={mode!r} → yolo")
+    return "yolo"
+
+
+def _new_detector(prev: YoloDetector | None = None) -> YoloDetector:
+    if prev is None:
+        return YoloDetector()
+    return YoloDetector(
+        model_name=prev.model_name,
+        conf=prev.conf,
+        iou=prev.iou,
+        imgsz=prev.imgsz,
+        device=prev.device,
+        use_track=prev.use_track,
+    )
+
+
+def _draw_preview(frame, dets: FrameDetections, reason: str, score: float, fall: bool):
     import cv2
 
-    source = str(source)
+    vis = frame.copy()
+    for p in dets.persons:
+        x1, y1, x2, y2 = (int(v) for v in p.xyxy)
+        color = (0, 165, 255) if fall else (0, 255, 0)
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            vis, f"person {p.conf:.2f}", (x1, max(20, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+        )
+    cv2.putText(
+        vis,
+        f"yolo n={dets.person_count} {reason} conf={score:.2f}",
+        (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+    )
+    return vis
+
+
+def run(
+    source: str | None = None,
+    device_id: str | None = None,
+    mode: str | None = None,
+    preview: bool = False,
+    loop_file: bool = True,
+) -> None:
+    """main.py 스레드 진입점. 인자 없으면 VISION_* / DEVICE_ID 환경변수 사용."""
+    import cv2
+
+    source = str(source if source is not None else os.getenv("VISION_SOURCE", "0"))
+    device_id = str(device_id if device_id is not None else os.getenv("DEVICE_ID", "homecam-1"))
+    mode = _normalize_mode(mode if mode is not None else DEFAULT_MODE)
+    stop.clear()
     try:
         cap, fps = _open_capture(source)
     except Exception as e:
         print(f"[vision] {e} → 영상 감지 중단")
         return
+
     is_file = not source.isdigit() and Path(source).exists()
     ring: deque[np.ndarray] = deque(maxlen=max(int((CLIP_SEC + POST_SEC) * fps), 1))
-    trigger = MotionTrigger(TriggerConfig(min_interval_sec=COOLDOWN_SEC))
-    threading.Thread(target=_analysis_worker, args=(device_id, mode), daemon=True).start()
-    if mode == "yolo":   # 첫 트리거 때 로딩 지연이 없도록 미리 불러 둠
-        threading.Thread(target=load_yolo, daemon=True).start()
+    trigger = YoloTrigger(TriggerConfig(min_interval_sec=COOLDOWN_SEC))
+    pending: dict | None = None
+    last_dets: FrameDetections | None = None
 
-    print(f"\n영상 감지 시작 (source={source}, fps≈{fps:.0f}, mode={mode}, "
-          f"fixtures={len(list_fixtures())}개)")
+    detector = _new_detector()
+    try:
+        detector.load()
+    except Exception as e:
+        print(f"[vision] YOLO 로드 실패: {e}")
+        print("[vision] tip: pip install ultralytics")
+        cap.release()
+        return
+
+    if mode != "yolo":
+        threading.Thread(target=_backup_worker, args=(device_id, mode), daemon=True).start()
+        nfix = 0
+        try:
+            from detection.qwen_backup import list_fixtures
+            nfix = len(list_fixtures())
+        except Exception:
+            pass
+        print(f"[vision] obs backup mode={mode} (fixtures={nfix}) — trigger still YOLO")
+
+    print(
+        f"\n영상 감지 시작 (source={source}, fps≈{fps:.0f}, mode={mode}, "
+        f"every_n={PROCESS_EVERY_N}, cooldown={COOLDOWN_SEC}s)"
+    )
+
     frame_i = 0
-    pending: dict | None = None   # 트리거 후 POST_SEC 프레임 모으는 중
     try:
         while not stop.is_set():
             t_loop = time.monotonic()
@@ -245,51 +343,73 @@ def run(source: str = "0", device_id: str = "homecam-1", mode: str = "yolo",
                 if is_file and loop_file:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     trigger.reset()
+                    detector = _new_detector(detector)
+                    detector.load()
+                    last_dets = None
                     continue
                 print("[vision] 프레임 없음 → 종료")
                 break
+
             ring.append(frame)
             frame_i += 1
             now = time.time()
-
-            # 1) 트리거 판정: judge 요청 > 모션
-            fired, score, reason = False, 0.0, ""
             ext = _pop_check()
+
+            run_infer = (frame_i % PROCESS_EVERY_N == 0) or bool(ext)
+            if run_infer:
+                last_dets = detector.detect(frame)
+            dets = last_dets
+            if dets is None:
+                if is_file:
+                    time.sleep(max(0.0, 1.0 / fps - (time.monotonic() - t_loop)))
+                continue
+
             if ext:
-                r = trigger.force_fire(now)
-                fired, score, reason = True, r.score, ext
-            elif frame_i % PROCESS_EVERY_N == 0:
-                r = trigger.update(frame, now)
-                fired, score, reason = r.fired, r.score, r.reason
+                tr = trigger.force_observe(dets, now, reason=ext)
+            else:
+                tr = trigger.update(dets, now)
+
+            fired, score, reason = tr.fired, tr.score, tr.reason
 
             if preview:
-                vis = frame.copy()
-                cv2.putText(vis, f"motion={score:.3f} {reason}", (12, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imshow("vision", vis)
+                vis = _draw_preview(frame, dets, reason, score, tr.fall_candidate)
+                cv2.imshow("vision-yolo", vis)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
                 if key == ord("t"):
-                    trigger.force_fire(now)
-                    fired, reason = True, "manual"
+                    tr = trigger.force_observe(dets, now, reason="manual")
+                    fired, score, reason = True, tr.score, "manual"
 
             if fired and pending is None:
-                print(f"[{now_iso()}] ⚡ 영상 트리거 ({reason}, score={score:.3f})")
-                job = {"reason": reason, "score": score, "timestamp": now_iso(), "fps": fps}
-                if mode == "stub":          # 미리 추론한 결과를 쓰므로 프레임 불필요
-                    _submit(job)
+                print(
+                    f"[{now_iso()}] ⚡ 영상 트리거 ({reason}, "
+                    f"conf={score:.3f}, n={tr.person_count})"
+                )
+                job = {
+                    "reason": reason,
+                    "score": score,
+                    "timestamp": now_iso(),
+                    "fps": fps,
+                    "person_count": tr.person_count,
+                    "yolo": dets.as_dict(),
+                }
+                if mode == "yolo":
+                    t0 = time.time()
+                    obs = map_observation(dets, tr)
+                    _emit_obs(device_id, obs, job, "yolo", None, time.time() - t0)
+                elif mode == "stub":
+                    _submit_backup(job)
                 else:
-                    pending = {**job, "left": int(POST_SEC * fps)}
+                    pending = {**job, "left": max(int(POST_SEC * fps), 1)}
 
-            # 2) local: 트리거 이후 POST_SEC 까지 모은 뒤 클립 확정
             if pending is not None:
                 pending["left"] -= 1
                 if pending["left"] <= 0:
-                    _submit({**pending, "frames": list(ring)})
+                    _submit_backup({**pending, "frames": list(ring)})
                     pending = None
 
-            if is_file:   # 파일은 실제 속도로 재생
+            if is_file:
                 time.sleep(max(0.0, 1.0 / fps - (time.monotonic() - t_loop)))
     except KeyboardInterrupt:
         print("\n[vision] 사용자 중단")
@@ -301,12 +421,18 @@ def run(source: str = "0", device_id: str = "homecam-1", mode: str = "yolo",
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="영상 트리거 → 클립 관측 (단독 실행)")
+    ap = argparse.ArgumentParser(description="YOLO 영상 트리거·관측 (단독 실행)")
     ap.add_argument("--source", default="0", help="웹캠 번호 | mp4 경로 | rtsp://...")
     ap.add_argument("--device-id", default="homecam-1")
-    ap.add_argument("--mode", choices=("yolo", "stub", "local"), default=os.getenv("VISION_MODE", "yolo"))
+    ap.add_argument(
+        "--mode",
+        choices=("yolo", "stub", "local", "qwen"),
+        default=DEFAULT_MODE,
+    )
     ap.add_argument("--preview", action="store_true")
     a = ap.parse_args()
+    # allow re-run in same process
+    stop.clear()
     run(a.source, a.device_id, a.mode, preview=a.preview)
 
 

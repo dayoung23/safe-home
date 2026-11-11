@@ -9,6 +9,6 @@ transformers
 torch
 sounddevice
 ultralytics
-# 영상 실추론(VISION_MODE=local)할 때만 필요
+# Qwen 백업(VISION_MODE=qwen|local)할 때만 필요
 # accelerate
 # qwen-vl-utils[decord]
