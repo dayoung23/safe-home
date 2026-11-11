@@ -100,7 +100,10 @@
 
   /* ── 확인(읽음) 처리 ── */
   const acked = new Set(JSON.parse(localStorage.getItem("sh_acked") || "[]"));
-  function ack(id) { acked.add(id); localStorage.setItem("sh_acked", JSON.stringify([...acked].slice(-200))); }
+  function ack(id) {
+    acked.add(id); localStorage.setItem("sh_acked", JSON.stringify([...acked].slice(-200)));
+    document.dispatchEvent(new CustomEvent("sh:acked", { detail: id }));   // 홈 화면이 바로 다시 그림
+  }
   function isAcked(id) { return acked.has(id); }
 
   /* ── 소리 (Web Audio) ── */
@@ -195,6 +198,7 @@
         alarmEl.hidden = true;
         if (act === "call") toast("📞 112에 연결합니다 (시연 화면)");
         if (act === "view") openDetail(id);
+        if (act === "close") { ack(id); toast("확인 처리했어요. 새 위험이 생기면 다시 알려드릴게요"); }
       });
     }
     alarmEl.dataset.id = a.id;

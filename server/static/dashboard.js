@@ -68,16 +68,22 @@
   $("bellBtn").addEventListener("click", () => $("alertsTop").scrollIntoView({ behavior: "smooth" }));
 
   /* ── 집 상태 히어로: 최근 10분 안의 확인 안 한 알림 중 가장 높은 등급 ── */
+  function unreadRecent() {
+    return alerts.filter((a) => !SH.isAcked(a.id) && Date.now() - new Date(a.updated_at).getTime() < 3 * 60 * 1000 && a.level !== "안전");
+  }
+  function heroTop() {
+    return unreadRecent().sort((x, y) => SH.LEVEL_RANK[y.level] - SH.LEVEL_RANK[x.level])[0];
+  }
   function renderHero() {
-    const recent = alerts.filter((a) => !SH.isAcked(a.id) && Date.now() - new Date(a.updated_at).getTime() < 10 * 60 * 1000 && a.level !== "안전");
-    const top = recent.sort((x, y) => SH.LEVEL_RANK[y.level] - SH.LEVEL_RANK[x.level])[0];
+    const recent = unreadRecent();
+    const top = heroTop();
     const hero = $("hero");
     if (top && top.level === "위험") {
       hero.className = "hero danger"; $("heroIcon").innerHTML = '<use href="#i-alert"/>';
-      $("heroTitle").textContent = "위험이 감지됐어요"; $("heroText").textContent = top.title;
+      $("heroTitle").textContent = "위험이 감지됐어요"; $("heroText").textContent = `${top.title} · 눌러서 확인`;
     } else if (top) {
       hero.className = "hero warn"; $("heroIcon").innerHTML = '<use href="#i-alert"/>';
-      $("heroTitle").textContent = "확인이 필요해요"; $("heroText").textContent = top.title;
+      $("heroTitle").textContent = "확인이 필요해요"; $("heroText").textContent = `${top.title} · 눌러서 확인`;
     } else {
       hero.className = "hero safe"; $("heroIcon").innerHTML = '<use href="#i-shield-check"/>';
       $("heroTitle").textContent = "우리 집은 안전해요";
@@ -87,6 +93,11 @@
     const unread = recent.length;
     $("bellDot").hidden = !unread; $("bellDot").textContent = unread;
   }
+
+  document.addEventListener("sh:acked", () => { renderList(true); renderHero(); });
+  $("hero").addEventListener("click", () => {
+    const top = heroTop(); if (top) openAlertDetail(top.id);
+  });
 
   SH.onAlerts((list) => {
     alerts = list;

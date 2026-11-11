@@ -43,7 +43,8 @@ except ImportError:
 EVENT_LOG = Path(__file__).resolve().parent / "judge_events.jsonl"
 FINALIZE_SEC = 5.0         # 사건 창: 첫 이벤트 후 이만큼 모아서 최종 판정
 LOOKBACK_SEC = 10.0        # 사건이 열리기 직전 이만큼의 이벤트도 같은 사건에 포함
-JOIN_WINDOW_SEC = 30.0     # 마지막 이벤트 후 이 시간이 지나면 사건 종료
+JOIN_WINDOW_SEC = 15.0     # 마지막 "의미 있는" 이벤트 후 이 시간이 지나면 사건 종료
+INCIDENT_MAX_SEC = 30.0    # 사건은 열린 뒤 최대 이 시간까지만 (카메라가 계속 이벤트를 보내도 영원히 안 닫히는 문제 방지)
 HISTORY_SEC = 60.0
 ENTRY_WAIT_SEC = 8.0       # 현관 진입 후 도어락 인증(키패드) 결과를 기다리는 시간
 ENTRY_ALONE = "도어락 인증 없이 현관으로 사람이 들어왔어요"
@@ -206,8 +207,8 @@ def on_event(event: dict[str, Any]) -> None:
             hist.popleft()
 
         inc = _incident.get(device)
-        if inc and now - inc["t_last"] > JOIN_WINDOW_SEC:
-            _incident.pop(device, None)   # 오래된 사건은 닫음
+        if inc and _expired(inc, now):
+            _incident.pop(device, None)   # 오래된 사건은 닫음 → 이번 이벤트는 새 사건으로 판단
             inc = None
 
         decision: dict[str, Any] = {"source": src, "type": event.get("type")}
@@ -221,7 +222,9 @@ def on_event(event: dict[str, Any]) -> None:
             if not inc["final"]:
                 title += " (확인 중)"
             message, action = compose(new_level, title, parts)
-            inc.update(level=new_level, reason=reason or inc["reason"], t_last=now)
+            inc.update(level=new_level, reason=reason or inc["reason"])
+            if _notable(src, event):      # 사람만 보임 같은 평범한 이벤트는 사건을 연장하지 않음
+                inc["t_last"] = now
             _update(inc["alert_id"], level=new_level, message=message, reason=title,
                     action=action, sources=sorted(parts))
             decision.update(action="update", alert_id=inc["alert_id"], level=new_level)
@@ -254,6 +257,16 @@ def on_event(event: dict[str, Any]) -> None:
         _last_by_source[src] = {"t": now, "type": event.get("type"), "message": str(event.get("message") or "")[:80]}
 
 
+def _expired(inc: dict[str, Any], now: float) -> bool:
+    return now - inc["t_last"] > JOIN_WINDOW_SEC or now - inc["t_open"] > INCIDENT_MAX_SEC
+
+
+def _notable(src: str, event: dict[str, Any]) -> bool:
+    """그 이벤트 하나만으로도 알림거리가 되는가 (소리·도어락 이상, 쓰러짐·위협·현관 진입 등)."""
+    level, _ = evaluate({src: event})
+    return level is not None
+
+
 def snapshot(limit: int = 30) -> dict[str, Any]:
     """대시보드용 상태: 센서별 마지막 이벤트(몇 초 전) + 최근 판단 기록 + 열린 사건."""
     now = time.time()
@@ -262,7 +275,7 @@ def snapshot(limit: int = 30) -> dict[str, Any]:
         recent = list(_recent)[-limit:][::-1]
         incidents = [{"device": d, "level": i["level"], "reason": i["reason"], "final": i["final"],
                       "age": round(now - i["t_open"], 1)}
-                     for d, i in _incident.items() if now - i["t_last"] <= JOIN_WINDOW_SEC]
+                     for d, i in _incident.items() if not _expired(i, now)]
     return {"sensors": sensors, "recent": recent, "incidents": incidents,
             "window_sec": FINALIZE_SEC}
 
@@ -302,7 +315,7 @@ def _entry_check(device: str, t_entry: float) -> None:
     with _lock:
         now = time.time()
         inc = _incident.get(device)
-        if (inc and now - inc["t_last"] <= JOIN_WINDOW_SEC) or _last_save.get(device, 0) >= t_entry:
+        if (inc and not _expired(inc, now)) or _last_save.get(device, 0) >= t_entry:
             return                       # 이미 다른 이벤트로 처리됨
         parts = _parts(device, t_entry - LOOKBACK_SEC)
         level, reason = evaluate(parts)
