@@ -3,7 +3,7 @@ main.py — 감지 스레드 시작 + Flask 서버 실행. 프로젝트 루트(s
 """
 import threading
 
-from detection import sound, vision
+from detection import realtime, vision      # realtime = 소리 + 키패드 (sound/keypad는 realtime이 내부에서 씀)
 from server.app import app
 
 
@@ -16,6 +16,6 @@ def start_thread(module):
 
 
 if __name__ == "__main__":
-    start_thread(sound)
+    start_thread(realtime)
     start_thread(vision)
     app.run(port=5000, use_reloader=False)  # reloader 켜면 스레드가 2번 뜸

@@ -25,8 +25,12 @@ import numpy as np
 import requests
 
 # AST 모델은 sound.py에서 한 번만 로드해 공유합니다.
-from sound import classifier, WATCH_THRESHOLDS
-from keypad import analyze_keypad_audio, LOCK_TOP_LABELS
+try:
+    from detection.sound import classifier, WATCH_THRESHOLDS        # 루트에서 python main.py
+    from detection.keypad import analyze_keypad_audio, LOCK_TOP_LABELS
+except ImportError:
+    from sound import classifier, WATCH_THRESHOLDS                  # detection 폴더에서 단독 실행
+    from keypad import analyze_keypad_audio, LOCK_TOP_LABELS
 
 # ───────────────────────── 설정 ─────────────────────────
 SR = 16000                # AST 입력 샘플레이트
@@ -208,9 +212,40 @@ def make_keypad_event(res: dict, device_id: str, risk: str) -> dict:
     }
 
 
+# ── judge 연결용: notify로 나간 이벤트를 최근 RECENT_KEEP_SEC초 동안 메모리에 보관 ──
+RECENT_KEEP_SEC = 10
+_recent = deque()                 # (time.time(), event)
+_recent_lock = threading.Lock()
+
+
+def get_recent(seconds: float = 5) -> list:
+    """최근 seconds초 동안 notify로 나간 이벤트 리스트 (judge가 호출)"""
+    now = time.time()
+    with _recent_lock:
+        return [e for t, e in _recent if now - t <= seconds]
+
+
+def _send_to_judge(event: dict):
+    """judge.on_event를 별도 스레드로 호출 → LLM이 느려도 녹음 루프는 안 멈춤"""
+    try:
+        from risk import judge          # 함수 안에서 import → 순환 import 방지
+    except ImportError:
+        return
+    if hasattr(judge, "on_event"):      # judge.py가 아직 비어 있으면 건너뜀
+        threading.Thread(target=judge.on_event, args=(event,), daemon=True).start()
+
+
 def notify(event: dict):
     with open(EVENT_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    now = time.time()
+    with _recent_lock:
+        _recent.append((now, event))
+        while _recent and now - _recent[0][0] > RECENT_KEEP_SEC:
+            _recent.popleft()
+    _send_to_judge(event)
+
     if SERVER_URL:
         try:
             requests.post(SERVER_URL, json=event, timeout=3)
@@ -220,11 +255,18 @@ def notify(event: dict):
 
 # ───────────────────────── 메인 루프 ─────────────────────────
 def main():
+    """명령줄 단독 실행용: python realtime.py --source mic"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default="mic", help="mic | 파일 경로 | rtsp://...")
     parser.add_argument("--device-id", default="homecam-1")
     parser.add_argument("--mic-device", type=int, default=None, help="마이크 장치 번호 (선택)")
     args = parser.parse_args()
+    run(args.source, args.device_id, args.mic_device)
+
+
+def run(source: str = "mic", device_id: str = "homecam-1", mic_device=None):
+    """main.py가 스레드로 실행하는 함수. 루프 내용은 기존 main()과 동일"""
+    args = argparse.Namespace(source=source, device_id=device_id, mic_device=mic_device)
 
     ring = RingBuffer(BUFFER_SEC)
     is_file = os.path.exists(args.source)

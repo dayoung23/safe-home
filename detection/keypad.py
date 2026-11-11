@@ -7,7 +7,10 @@ from scipy.io import wavfile
 from scipy.signal import find_peaks
 
 # AST 모델은 sound.py에서 한 번만 로드해 공유합니다. (realtime.py와 같이 써도 모델이 중복 로딩되지 않음)
-from sound import classifier
+try:
+    from detection.sound import classifier      # 루트에서 python main.py로 실행할 때
+except ImportError:
+    from sound import classifier                # detection 폴더에서 단독 실행할 때
 
 # 도어락 물리 잠금음으로 매핑하는 AST 라벨 (기존 규칙 그대로)
 LOCK_TOP_LABELS = ["Single-lens reflex camera", "Mechanisms", "Clicking"]
