@@ -1,0 +1,16 @@
+{
+  "user_name": "집주인_A",
+  "pin_length": 4,
+  "mean_intervals": [
+    0.35,
+    0.4,
+    0.32
+  ],
+  "std_intervals": [
+    0.06,
+    0.08,
+    0.05
+  ],
+  "enrolled_count": 5,
+  "last_updated": "2026-11-12 00:24:39"
+}
