@@ -1,0 +1,54 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- ML caches / weights ---
+.cache/
+huggingface/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.ckpt
+models/
+weights/
+
+# --- Media ---
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+clips/
+
+# --- Logs / temp ---
+*.log
+tmp/
+temp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
