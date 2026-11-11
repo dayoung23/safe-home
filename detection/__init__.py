@@ -1,1 +1,1 @@
-"""Realtime detection servers (sound / vision) and helpers."""
+"""Realtime detection servers (sound / YOLO vision) and helpers."""
