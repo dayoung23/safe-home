@@ -13,6 +13,7 @@ main.py — Flask 웹서버 + 감지 스레드(오디오, 영상)를 한 프로�
   VISION_SOURCE=0       노트북 캠 번호 | 파일 경로 | rtsp:// | http://.../stream.mjpg
   VISION_MODE=yolo      yolo (기본) | stub | local(qwen)
 """
+import logging
 import os
 import threading
 
@@ -30,7 +31,11 @@ def start(name, target, **kwargs):
     print(f"[main] {name} 시작 {kwargs}")
 
 
+# Flask 접속 기록(GET /api/alerts ...)은 대시보드가 1.5초마다 조회해서 로그가 묻힘 → 에러만 출력
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 if __name__ == "__main__":
     start("audio", realtime.run, source=AUDIO_SOURCE, device_id=DEVICE_ID)
     start("vision", vision.run, source=VISION_SOURCE, device_id=DEVICE_ID, mode=VISION_MODE)
+    print("[main] 대시보드: http://localhost:5000")
     app.run(port=5000, use_reloader=False)  # reloader 켜면 스레드가 2번 뜸
