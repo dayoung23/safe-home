@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Safe Home 키패드 등록</title>
+<style>
+  body { font-family: sans-serif; max-width: 420px; margin: 60px auto; }
+  button { padding: 10px 16px; }
+  #count { font-size: 32px; margin: 16px 0; }
+  #msg { color: #c00; }
+</style>
+</head>
+<body>
+<p><a href="/">← 대시보드</a></p>
+<h2>내 키패드 패턴 등록</h2>
+<p>버튼을 누른 뒤 도어락 비밀번호를 평소처럼 10번 입력해 주세요.</p>
+<button id="btn">등록 시작</button>
+<div id="count"></div>
+<p id="msg"></p>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null;
+
+async function poll() {
+  const res = await fetch("/api/keypad/register/status");
+  if (res.status === 401) { location.href = "/login"; return; }
+  const st = await res.json();
+  if (st.active === false) return;          // 내 등록이 진행 중이 아님
+  $("count").textContent = `${st.count} / ${st.target}`;
+  if (st.done) {
+    clearInterval(timer);
+    $("count").textContent += "  ✅ 등록 완료";
+  }
+}
+
+$("btn").onclick = async () => {
+  $("msg").textContent = "";
+  const res = await fetch("/api/keypad/register", { method: "POST" });
+  if (res.status === 401) { location.href = "/login"; return; }
+  const data = await res.json();
+  if (!data.ok) { $("msg").textContent = data.error; return; }
+  clearInterval(timer);
+  timer = setInterval(poll, 1000);
+  poll();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Safe Home 대시보드</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 30px auto; }
+  header { display: flex; justify-content: space-between; align-items: center; }
+  .card { border-radius: 8px; padding: 12px; margin: 10px 0; border-left: 8px solid #999; background: #f4f4f4; }
+  .위험 { border-color: #d32f2f; background: #fdecea; }
+  .주의 { border-color: #f9a825; background: #fff8e1; }
+  .안전 { border-color: #388e3c; background: #e8f5e9; }
+  .meta { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="me">불러오는 중...</div>
+  <div>
+    <a href="/keypad">키패드 등록</a>
+    <button id="logout">로그아웃</button>
+  </div>
+</header>
+
+<h2>알림</h2>
+<div id="alerts">알림이 없어요</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function goLoginIf401(res) {
+  if (res.status === 401) { location.href = "/login"; return true; }
+  return false;
+}
+
+async function loadMe() {
+  const res = await fetch("/api/me");
+  if (goLoginIf401(res)) return;
+  const me = await res.json();
+  $("me").textContent = `${me.name}님 (${me.username}) · 키패드 샘플 ${me.sample_count}개`;
+}
+
+function line(text, cls) {
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = text;          // textContent → 메시지에 HTML이 섞여도 안전
+  return div;
+}
+
+async function loadAlerts() {
+  const res = await fetch("/api/alerts");
+  if (goLoginIf401(res)) return;
+  const list = await res.json();
+  if (!Array.isArray(list)) return;   // {"ok":false,...} 오류 응답
+  const box = $("alerts");
+  box.innerHTML = "";
+  if (list.length === 0) { box.textContent = "알림이 없어요"; return; }
+  for (const a of list) {
+    const card = document.createElement("div");
+    card.className = "card " + a.level;
+    card.appendChild(line(`[${a.level}] ${a.message}`));
+    if (a.reason) card.appendChild(line("근거: " + a.reason));
+    if (a.action) card.appendChild(line("추천 행동: " + a.action));
+    card.appendChild(line(`${a.updated_at} · ${(a.sources || []).join(", ")}`, "meta"));
+    box.appendChild(card);
+  }
+}
+
+$("logout").onclick = async () => {
+  await fetch("/api/logout", { method: "POST" });
+  location.href = "/login";
+};
+
+loadMe();
+loadAlerts();
+setInterval(loadAlerts, 1500);
+</script>
+</body>
+</html>
